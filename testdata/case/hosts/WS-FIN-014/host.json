@@ -1,0 +1,10 @@
+{
+  "id": "WS-FIN-014",
+  "name": "WS-FIN-014",
+  "fqdn": "ws-fin-014.corp.acme.local",
+  "os": "Windows 11 Pro 23H2",
+  "ip": "10.20.40.114",
+  "role": "Finance workstation (jbeck)",
+  "tag": "WS",
+  "triageStart": "2025-11-08 06:00:00"
+}

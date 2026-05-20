@@ -1,0 +1,895 @@
+/* ============================================================
+   EXTRAS — additions on top of the design's app.css that the
+   live Go-served app needs (open-case prompt, art cards, tl-kpi).
+   Matches the Douglas visual language: 2px corners, flat surfaces,
+   accent left-bars instead of soft shadows.
+   ============================================================ */
+
+/* welcome / open-case prompt */
+.welcome {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+}
+.welcome-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 2px;
+  padding: 28px 32px;
+  box-shadow: none;
+  max-width: 520px;
+  width: 100%;
+}
+.welcome h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  color: var(--fg);
+}
+.welcome p {
+  margin: 0 0 18px;
+  font-size: 13px;
+  color: var(--fg-3);
+  line-height: 1.55;
+}
+.welcome .row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.welcome input[type="text"] {
+  flex: 1;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 8px 12px;
+  color: var(--fg);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+}
+.welcome input[type="text"]:focus {
+  border-color: var(--accent);
+}
+.welcome .hint {
+  font-size: 11px;
+  color: var(--fg-faint);
+  margin-top: 10px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* host overview wrapper around .host-overview KPIs */
+.host-page {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.host-page-body {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.host-page h3 {
+  margin: 20px 16px 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg-3);
+  font-weight: 600;
+}
+
+/* KPI strip across the top of the host overview page */
+.host-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  padding: 16px 16px 4px;
+}
+.host-kpi {
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 96px;
+}
+.host-kpi .kpi-ico {
+  width: 28px;
+  height: 28px;
+  border-radius: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-soft);
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.host-kpi.alert .kpi-ico {
+  color: var(--crit);
+  background: rgba(220, 70, 70, 0.08);
+  border-color: rgba(220, 70, 70, 0.3);
+}
+.host-kpi .kpi-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg-3);
+  font-weight: 600;
+}
+.host-kpi .kpi-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  word-break: break-word;
+}
+.host-kpi.alert .kpi-value {
+  color: var(--crit);
+}
+.host-kpi .kpi-sub {
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.4;
+}
+.art-card-grid {
+  padding: 4px 16px 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.art-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: none;
+  transition: border-color 0.15s;
+}
+.art-card:hover {
+  border-color: var(--accent);
+}
+.art-card .ac-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.art-card .ac-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-soft);
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  font-size: 16px;
+}
+.art-card .ac-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg);
+}
+.art-card .ac-sub {
+  font-size: 10.5px;
+  color: var(--fg-3);
+}
+.art-card .ac-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.art-card .ac-alert {
+  color: var(--crit);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* tiny notice / toast */
+.toast {
+  position: fixed;
+  bottom: 32px;
+  right: 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 2px;
+  padding: 10px 14px;
+  color: var(--fg);
+  font-size: 12px;
+  box-shadow: none;
+  z-index: 100;
+  max-width: 320px;
+}
+.toast.err {
+  border-left-color: var(--crit);
+}
+
+/* breadcrumb host link (clickable) */
+.crumbs .host.link {
+  cursor: pointer;
+  text-decoration: none;
+}
+.crumbs .host.link:hover {
+  text-decoration: underline;
+}
+
+/* tl kpi card variant */
+.tl-kpi {
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: none;
+}
+.tl-kpi .label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-3);
+  font-weight: 600;
+}
+.tl-kpi .value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.tl-kpi .sub {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.tl-kpi .sev-line {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.tl-kpi .sev-line span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* timeline empty state */
+.tl-empty {
+  padding: 60px 24px;
+  text-align: center;
+  color: var(--fg-3);
+}
+.tl-empty .ico {
+  font-size: 42px;
+  color: var(--fg-faint);
+  margin-bottom: 12px;
+}
+.tl-empty h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  color: var(--fg-2);
+}
+.tl-empty p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* trash button on timeline cards */
+.tl-trash {
+  background: transparent;
+  border: 0;
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 13px;
+}
+.tl-trash:hover {
+  color: var(--crit);
+  background: var(--bg-3);
+}
+
+/* severity dots — these are status indicators (not surfaces),
+   so they stay circular per the original design */
+.sev-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.sev-dot.crit { background: var(--crit); }
+.sev-dot.high { background: var(--warn); }
+.sev-dot.med  { background: var(--info); }
+.sev-dot.low  { background: var(--ok); }
+.sev-dot.info { background: var(--fg-faint); }
+
+/* export menu (CSV / JSON picker dropdown anchored to a button) */
+.export-menu {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 4px;
+  min-width: 160px;
+  box-shadow: none;
+}
+.export-opt {
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 2px;
+  user-select: none;
+}
+.export-opt:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* path + Browse button row inside the import modal */
+.path-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-bottom: 14px;
+}
+.path-row input[type="text"] {
+  margin-bottom: 0 !important;
+  flex: 1;
+}
+.path-row .btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Folder browser sub-modal */
+.browser-backdrop {
+  /* Slightly higher than the import modal's backdrop so it stacks on top */
+  z-index: 210;
+}
+.browser-modal {
+  width: min(720px, 94vw);
+  height: min(640px, 88vh);
+  display: flex;
+  flex-direction: column;
+}
+.browser-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0; /* allow .fb-list to scroll */
+}
+.fb-crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.fb-crumbs .crumb {
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+.fb-crumbs .crumb.link {
+  cursor: pointer;
+  color: var(--accent);
+}
+.fb-crumbs .crumb.link:hover {
+  background: var(--accent-soft);
+}
+.fb-crumbs .crumb.cur {
+  color: var(--fg);
+  font-weight: 600;
+}
+.fb-crumbs .crumb-sep {
+  color: var(--fg-faint);
+  padding: 0 2px;
+}
+.fb-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fb-hint {
+  font-size: 11px;
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+}
+.fb-loading, .fb-empty {
+  padding: 18px 12px;
+  color: var(--fg-3);
+  font-size: 12px;
+  text-align: center;
+}
+.fb-list {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  background: var(--bg-1);
+}
+.fb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.fb-row:last-child { border-bottom: 0; }
+.fb-row:hover {
+  background: var(--accent-soft);
+}
+.fb-row.hint .fb-ico {
+  color: var(--accent);
+}
+.fb-row .fb-ico {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--fg-3);
+}
+.fb-row .fb-name {
+  color: var(--fg);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.fb-row .fb-path {
+  color: var(--fg-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}
+.modal-foot .fb-current {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--fg-3);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* import-case modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 200;
+}
+.modal {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 2px;
+  padding: 0;
+  width: min(560px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-1);
+}
+.modal-head .ico {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 2px;
+  font-size: 13px;
+}
+.modal-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  flex: 1;
+}
+.modal-head .close {
+  background: transparent;
+  border: 0;
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+  border-radius: 2px;
+}
+.modal-head .close:hover {
+  color: var(--fg);
+}
+.modal-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  flex: 1;
+}
+.modal-body label {
+  display: block;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg-3);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.modal-body p {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--fg-3);
+  line-height: 1.55;
+}
+.modal-body input[type="text"] {
+  width: 100%;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 8px 12px;
+  color: var(--fg);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+  margin-bottom: 14px;
+}
+.modal-body input[type="text"]:focus {
+  border-color: var(--accent);
+}
+.modal-body input[type="text"].err {
+  border-color: var(--crit);
+}
+.modal-body .err-msg {
+  font-size: 12px;
+  color: var(--crit);
+  margin: -10px 0 12px;
+}
+.recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.recent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+}
+.recent-row:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.recent-row .path {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-row .forget {
+  background: transparent;
+  border: 0;
+  color: var(--fg-faint);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 2px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.recent-row .forget:hover {
+  color: var(--crit);
+  background: var(--bg-3);
+}
+.recent-empty {
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  font-style: italic;
+}
+.modal-foot {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-1);
+}
+
+/* ---- export picker modal ---- */
+.export-modal {
+  width: min(560px, 94vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+.export-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.exp-format {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.exp-fields-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.linkbtn {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+.linkbtn:hover {
+  background: var(--accent-soft);
+}
+.exp-field-list {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  background: var(--bg-1);
+  padding: 4px;
+  min-height: 120px;
+}
+.exp-group-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg-faint);
+  font-weight: 600;
+  padding: 8px 6px 4px;
+}
+.exp-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 2px;
+}
+.exp-field:hover {
+  background: var(--accent-soft);
+}
+.exp-field input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.exp-field-label {
+  flex: 1;
+}
+.exp-field-tag {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-faint);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 1px 5px;
+}
+
+/* group separator inside the row-detail kv-grid */
+.kv-grid .kv-group-sep {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg-faint);
+  font-weight: 600;
+}
+
+/* ---- column resize grip on each <th> ---- */
+.artifact-table thead th {
+  position: relative;       /* anchor for the absolutely-positioned grip */
+}
+.artifact-table thead th .col-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  /* Subtle visual cue on hover so analysts discover the grip. */
+  background: transparent;
+  z-index: 3;
+}
+.artifact-table thead th .col-grip:hover,
+.artifact-table thead th .col-grip:active {
+  background: var(--accent);
+  opacity: 0.55;
+}
+/* While a column is being resized, lock the cursor + suppress text
+   selection across the whole document so the drag feels solid. */
+body.col-resizing,
+body.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* ---- drawer divider between the table and the detail drawer ---- */
+.drawer-divider {
+  height: 5px;
+  background: var(--border-soft);
+  cursor: row-resize;
+  user-select: none;
+  flex-shrink: 0;
+  transition: background-color 0.15s;
+}
+.drawer-divider:hover,
+.drawer-divider:active {
+  background: var(--accent);
+}
+/* Hide the divider when the drawer is collapsed -- nothing to resize. */
+.table-wrap:has(.detail-drawer.closed) .drawer-divider {
+  display: none;
+}
+body.drawer-resizing,
+body.drawer-resizing * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+/* ---- per-column filter row inside <thead> ---- */
+/* ---- per-column filter integrated into each <th> ---- */
+/* The thead row is already sticky (set in app.css). The filter input
+   lives INSIDE the th, so when an input is open the th grows taller and
+   the whole sticky header takes that extra height. No second sticky row,
+   no overlap with data rows -- that was the old design's bug. */
+
+.artifact-table thead th .th-inner {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* No padding-right needed: the th already has 10px right padding which
+     keeps the funnel clear of the 6px col-grip. */
+}
+/* Top-align th contents so when one column opens its filter input (making
+   that th taller), the labels of OTHER columns stay at the top and line
+   up visually with the open column's label. Without this, default
+   middle-alignment shifts labels around as filters open. */
+.artifact-table thead th {
+  vertical-align: top;
+}
+.artifact-table thead th .th-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-table thead th .th-spacer { flex: 1; }
+
+.col-filter-toggle {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
+  cursor: pointer;
+  color: var(--fg-faint);
+  font-size: 10px;
+  user-select: none;
+  border-radius: 2px;
+  padding: 1px 2px;
+  flex-shrink: 0;
+}
+.col-filter-toggle:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+/* When the column has an active filter, the funnel turns filled and
+   accent-colored so you can see at a glance which columns are filtering. */
+.col-filter-toggle.active {
+  color: var(--accent);
+}
+.col-filter-toggle.open {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* The filter input -- only rendered when the column's toggle is open.
+   Sits below the th's label row, inside the same th, so it scrolls with
+   the sticky header rather than overlapping data rows. */
+.artifact-table thead th .col-filter-input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 3px 7px;
+  color: var(--fg);
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  outline: none;
+  box-sizing: border-box;
+  font-weight: normal;
+  text-transform: none;
+}
+.artifact-table thead th .col-filter-input::placeholder {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+.artifact-table thead th .col-filter-input:focus {
+  border-color: var(--accent);
+  background: var(--bg-1);
+}
+.artifact-table thead th .col-filter-input.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+/* A th whose filter is open or whose filter is active gets a subtle
+   accent-bar on the bottom so the analyst sees the column is "engaged". */
+.artifact-table thead th.filter-open,
+.artifact-table thead th.filter-active {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.artifact-table thead th.filter-open .th-label,
+.artifact-table thead th.filter-active .th-label {
+  color: var(--accent);
+}
+
+/* Warning chip for unknown field names in the global query bar.
+   Uses the critical-severity palette so it visually signals "this isn't
+   what you wanted" without looking like an error. */
+.chip.warn {
+  background: rgba(220, 70, 70, 0.12);
+  color: var(--crit);
+  border-color: rgba(220, 70, 70, 0.4);
+}
+.chip.warn:hover {
+  background: rgba(220, 70, 70, 0.18);
+}

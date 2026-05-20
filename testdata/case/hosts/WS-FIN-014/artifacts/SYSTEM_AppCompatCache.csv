@@ -1,0 +1,8 @@
+Position,LastModifiedTimeUTC,Path,Executed,RowType
+1,2025-11-08 03:14:22.881,C:\Users\jbeck\Downloads\mimikatz.exe,true,File
+2,2025-11-08 03:16:04.221,C:\Windows\Temp\PsExec64.exe,true,File
+3,2025-11-08 04:12:08.221,C:\ProgramData\Microsoft\Vault\svchost.exe,true,File
+4,2025-11-08 02:48:11.001,C:\Users\jbeck\Downloads\invoice_overdue.pdf.exe,true,File
+5,2025-11-08 02:42:00.000,C:\Users\jbeck\Downloads\TeamViewer_Setup.exe,true,File
+6,2024-02-15 18:01:00.000,C:\Program Files\Google\Chrome\Application\chrome.exe,true,File
+7,2025-11-08 03:32:11.110,C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe,true,File

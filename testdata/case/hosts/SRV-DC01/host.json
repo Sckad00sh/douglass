@@ -1,0 +1,10 @@
+{
+  "id": "SRV-DC01",
+  "name": "SRV-DC01",
+  "fqdn": "srv-dc01.corp.acme.local",
+  "os": "Windows Server 2022",
+  "ip": "10.20.10.5",
+  "role": "Primary Domain Controller",
+  "tag": "DC",
+  "triageStart": "2025-11-08 06:00:00"
+}

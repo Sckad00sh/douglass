@@ -1,0 +1,6 @@
+EntryNumber,InUse,FileName,Extension,ParentPath,FileSize,Created0x10,LastModified0x10,LastAccessed0x10,SiFlags,Copied
+50112,true,HR_All_Employees.zip,.zip,.\Users\exec\Documents,108957184,2025-11-08 05:02:11.001,2025-11-08 05:14:22.118,2025-11-08 05:14:22.118,Archive,false
+50113,true,7z.exe,.exe,.\ProgramData\7-Zip,1572864,2025-08-10 12:00:00.000,2025-08-10 12:00:00.000,2025-11-08 05:01:14.001,Archive,false
+50114,true,salaries.xlsx,.xlsx,.\Users\exec\Documents\HR,2457600,2025-10-22 09:00:00.000,2025-11-07 17:22:00.000,2025-11-08 05:01:00.118,Archive,false
+50115,true,terminations.docx,.docx,.\Users\exec\Documents\HR,348160,2025-11-04 14:00:00.000,2025-11-06 11:30:00.000,2025-11-08 05:01:30.118,Archive,false
+50116,true,outlook.exe,.exe,.\Program Files\Microsoft Office\root\Office16,28012544,2024-05-01 12:00:00.000,2025-10-22 12:00:00.000,2025-11-08 06:00:00.000,Archive,false

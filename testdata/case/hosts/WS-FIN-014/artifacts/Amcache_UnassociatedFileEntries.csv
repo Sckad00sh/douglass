@@ -1,0 +1,8 @@
+FileKeyLastWriteTimestamp,ApplicationName,FileExtension,FullPath,Size,SHA1,ProductName,Publisher,FileVersionString
+2025-11-08 03:14:22.881,mimikatz.exe,.exe,C:\Users\jbeck\Downloads\mimikatz.exe,1316352,a8b9c1d2e3f405061718293a4b5c6d7e8f901234,mimikatz,gentilkiwi,2.2.0.0
+2025-11-08 03:16:04.221,PsExec64.exe,.exe,C:\Windows\Temp\PsExec64.exe,832120,bbc1d2e3f405061718293a4b5c6d7e8f90123456,PsExec,Sysinternals,2.43
+2025-11-08 04:12:08.221,svchost.exe,.exe,C:\ProgramData\Microsoft\Vault\svchost.exe,56832,1234567890abcdef1234567890abcdef12345678,Cobalt Strike Beacon,(unknown),1.0.0.0
+2025-11-08 04:01:34.117,rclone.exe,.exe,C:\Users\jbeck\AppData\Roaming\rclone.exe,52428800,c0d1e2f3a4b5061718293a4b5c6d7e8f90123456,rclone,The Rclone Authors,1.65.0
+2025-11-08 02:42:00.000,TeamViewer_Setup.exe,.exe,C:\Users\jbeck\Downloads\TeamViewer_Setup.exe,28156000,d1e2f3a4b5061718293a4b5c6d7e8f90123456ab,TeamViewer,TeamViewer Germany GmbH,15.49.4.0
+2025-11-08 02:48:11.001,invoice_overdue.pdf.exe,.exe,C:\Users\jbeck\Downloads\invoice_overdue.pdf.exe,945152,e2f3a4b5061718293a4b5c6d7e8f90123456abcd,(unknown),(unknown),(unknown)
+2024-02-15 18:01:00.000,chrome.exe,.exe,C:\Program Files\Google\Chrome\Application\chrome.exe,3401896,f3a4b5061718293a4b5c6d7e8f90123456abcdef,Google Chrome,Google LLC,120.0.6099.71

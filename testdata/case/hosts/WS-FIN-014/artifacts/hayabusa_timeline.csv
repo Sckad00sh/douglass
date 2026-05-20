@@ -1,0 +1,13 @@
+Timestamp,Level,RuleTitle,Channel,EventID,Details,MitreTactics,MitreTechnique,RuleFile
+2025-11-08 03:14:22.881,crit,Mimikatz Command Line Execution,Security,4688,Process commandline contains 'sekurlsa::logonpasswords',Credential Access,T1003.001,proc_creation_win_mimikatz.yml
+2025-11-08 03:16:04.221,crit,PsExec Lateral Movement,System,7045,Service installation: PSEXESVC,Lateral Movement,T1021.002,sysmon_psexec_install.yml
+2025-11-08 03:14:21.871,high,Suspicious Double Extension Executable,Security,4688,invoice_overdue.pdf.exe spawned from Downloads,Initial Access,T1566.001,proc_creation_double_ext.yml
+2025-11-08 03:18:51.122,crit,LSASS Process Memory Access,Security,4663,Object access on lsass.exe handle 0x10A0,Credential Access,T1003.001,lsass_access.yml
+2025-11-08 04:12:08.221,high,Masqueraded svchost.exe Outside System32,Sysmon,1,svchost.exe in ProgramData\Vault is non-standard,Defense Evasion,T1036.005,proc_creation_masqueraded_svchost.yml
+2025-11-08 04:01:34.117,high,Rclone Configuration Created,Sysmon,11,rclone.conf written to AppData\Roaming,Exfiltration,T1567.002,file_create_rclone.yml
+2025-11-08 04:18:00.000,crit,Bulk Outbound Transfer via Rclone,Sysmon,3,Network connection to remote.acme-files.com:443 4.2GB,Exfiltration,T1567.002,network_rclone_exfil.yml
+2025-11-08 04:25:11.221,high,Security Log Cleared,Security,1102,Audit log cleared by jbeck,Defense Evasion,T1070.001,security_log_cleared.yml
+2025-11-08 03:32:11.110,med,PowerShell Script in Public Folder,PowerShell,4104,AdminScript.ps1 written to Users\Public,Execution,T1059.001,ps_public_script.yml
+2025-11-08 04:15:00.000,med,Startup Folder Persistence,Sysmon,11,config.xml in Startup,Persistence,T1547.001,startup_persistence.yml
+2025-11-08 02:48:11.001,low,New Executable in Downloads,Sysmon,11,invoice_overdue.pdf.exe written to Downloads,Initial Access,T1566.001,file_create_downloads.yml
+2025-11-08 02:42:00.000,info,Application Installed: TeamViewer,Sysmon,11,TeamViewer_Setup.exe written to Downloads,Discovery,T1018,teamviewer_install.yml

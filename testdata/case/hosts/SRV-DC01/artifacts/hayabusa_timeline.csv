@@ -1,0 +1,7 @@
+Timestamp,Level,RuleTitle,Channel,EventID,Details,MitreTactics,MitreTechnique,RuleFile
+2025-11-08 03:42:11.221,crit,Kerberoasting RC4 Ticket Requested,Security,4769,Service Ticket Request - TicketEncryptionType: 0x17 (RC4),Credential Access,T1558.003,kerberoast_rc4.yml
+2025-11-08 03:48:22.118,crit,New Privileged User Created,Security,4720,A user account was created: helpdesk2,Persistence,T1136.002,user_created_priv.yml
+2025-11-08 03:49:00.001,crit,Domain Admins Group Modified,Security,4728,helpdesk2 added to Domain Admins,Privilege Escalation,T1078.002,da_group_modified.yml
+2025-11-08 03:51:14.119,high,ADMIN$ Share Accessed from Workstation,Security,5140,Network share \\SRV-DC01\ADMIN$ accessed from 10.20.40.114,Lateral Movement,T1021.002,admin_share_access.yml
+2025-11-08 03:43:00.000,med,Unusual SPN Enumeration,Security,4662,GetUserSPNs LDAP query,Discovery,T1087.002,spn_enum.yml
+2025-11-08 04:00:00.000,info,Replication Heartbeat,Directory Service,3000,Replication completed,Discovery,N/A,replication_ok.yml

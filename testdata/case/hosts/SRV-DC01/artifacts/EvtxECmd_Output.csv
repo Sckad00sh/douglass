@@ -1,0 +1,7 @@
+TimeCreated,EventId,Level,Provider,Channel,MapDescription,UserName,PayloadData1
+2025-11-08 03:42:11.221,4769,Information,Microsoft-Windows-Security-Auditing,Security,A Kerberos service ticket was requested,CORP\jbeck,ServiceName: MSSQLSvc/db01 TicketEncryptionType: 0x17
+2025-11-08 03:48:22.118,4720,Information,Microsoft-Windows-Security-Auditing,Security,A user account was created,CORP\jbeck,TargetUserName: helpdesk2
+2025-11-08 03:49:00.001,4728,Information,Microsoft-Windows-Security-Auditing,Security,A member was added to a security-enabled global group,CORP\jbeck,GroupName: Domain Admins MemberName: helpdesk2
+2025-11-08 03:51:14.119,5140,Information,Microsoft-Windows-Security-Auditing,Security,A network share was accessed,CORP\helpdesk2,ShareName: \\*\ADMIN$ IpAddress: 10.20.40.114
+2025-11-08 03:43:00.000,4662,Information,Microsoft-Windows-Security-Auditing,Security,An operation was performed on an object,CORP\jbeck,ObjectType: User Properties: ServicePrincipalName
+2025-11-08 02:00:00.000,4624,Information,Microsoft-Windows-Security-Auditing,Security,An account was successfully logged on,CORP\Administrator,LogonType: 3

@@ -1,0 +1,14 @@
+EntryNumber,InUse,FileName,Extension,ParentPath,FileSize,Created0x10,LastModified0x10,LastAccessed0x10,SiFlags,Copied
+41208,true,mimikatz.exe,.exe,.\Users\jbeck\Downloads,1316352,2025-11-08 03:14:22.881,2025-11-08 03:14:22.881,2025-11-08 03:18:51.122,Archive,false
+41209,true,PsExec64.exe,.exe,.\Windows\Temp,832120,2025-11-08 03:16:04.221,2025-11-08 03:16:04.221,2025-11-08 03:24:00.811,Archive,true
+41210,true,notepad.exe,.exe,.\Windows\System32,201048,2021-06-05 13:09:11.401,2024-10-12 06:00:00.000,2025-11-08 02:55:14.700,Archive,false
+39812,false,rclone.conf,.conf,.\Users\jbeck\AppData\Roaming,4096,2025-11-08 04:01:32.214,2025-11-08 04:01:34.117,2025-11-08 04:01:34.117,Archive | Hidden,false
+39813,true,svchost.exe,.exe,.\ProgramData\Microsoft\Vault,56832,2025-11-08 04:12:08.221,2025-11-08 04:12:08.221,2025-11-08 04:12:14.119,Archive | Hidden | System,true
+41217,true,chrome.exe,.exe,.\Program Files\Google\Chrome\Application,3401896,2024-02-15 18:01:00.000,2025-10-12 18:01:00.000,2025-11-08 03:00:18.221,Archive,false
+41218,true,cookies.sqlite,.sqlite,.\Users\jbeck\AppData\Local\Google\Chrome\User Data\Default,245760,2025-09-01 12:00:00.000,2025-11-08 03:01:14.118,2025-11-08 03:01:14.118,Archive,false
+41220,true,invoice_overdue.pdf.exe,.exe,.\Users\jbeck\Downloads,945152,2025-11-08 02:48:11.001,2025-11-08 02:48:11.001,2025-11-08 03:14:21.871,Archive,false
+41221,true,config.xml,.xml,.\Users\jbeck\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup,1024,2025-11-08 04:15:00.000,2025-11-08 04:15:00.000,2025-11-08 04:15:00.000,Archive,false
+41222,true,AdminScript.ps1,.ps1,.\Users\Public,18472,2025-11-08 03:32:11.110,2025-11-08 03:32:11.110,2025-11-08 03:33:00.000,Archive,false
+41225,false,cleanup.bat,.bat,.\Windows\Temp,384,2025-11-08 04:21:00.221,2025-11-08 04:21:00.221,2025-11-08 04:21:11.000,Archive,false
+41226,true,TeamViewer_Setup.exe,.exe,.\Users\jbeck\Downloads,28156000,2025-11-08 02:42:00.000,2025-11-08 02:42:00.000,2025-11-08 02:45:00.000,Archive,false
+41227,true,kernel32.dll,.dll,.\Windows\System32,754952,2021-06-05 13:09:11.401,2024-10-12 06:00:00.000,2025-11-07 23:01:14.700,Archive,false

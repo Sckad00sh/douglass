@@ -1,0 +1,10 @@
+{
+  "id": "WS-EXEC-002",
+  "name": "WS-EXEC-002",
+  "fqdn": "ws-exec-002.corp.acme.local",
+  "os": "Windows 11 Pro 23H2",
+  "ip": "10.20.40.92",
+  "role": "Executive workstation",
+  "tag": "WS",
+  "triageStart": "2025-11-08 06:00:00"
+}

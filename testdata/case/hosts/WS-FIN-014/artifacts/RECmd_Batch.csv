@@ -1,0 +1,6 @@
+LastWriteTimestamp,KeyPath,ValueName,ValueData,Category,Comment
+2025-11-08 04:15:00.000,HKCU\Software\Microsoft\Windows\CurrentVersion\Run,Updater,C:\ProgramData\Microsoft\Vault\svchost.exe,Persistence,Run key autostart pointing at masqueraded svchost
+2025-11-08 03:16:04.221,HKLM\SYSTEM\CurrentControlSet\Services\PSEXESVC,ImagePath,%SystemRoot%\PSEXESVC.exe,Service,PsExec service installed
+2025-11-08 04:01:34.117,HKCU\Software\rclone,ConfigPath,C:\Users\jbeck\AppData\Roaming\rclone.conf,Exfiltration,Rclone configuration registered
+2025-11-08 03:32:11.110,HKCU\Software\Microsoft\Windows\CurrentVersion\PowerShell\1\ShellIds\Microsoft.PowerShell,ExecutionPolicy,Bypass,Defense Evasion,PowerShell execution policy disabled
+2024-02-15 18:01:00.000,HKLM\SOFTWARE\Google\Chrome,Version,120.0.6099.71,Application,

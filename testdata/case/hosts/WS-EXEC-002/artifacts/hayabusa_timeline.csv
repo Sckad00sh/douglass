@@ -1,0 +1,4 @@
+Timestamp,Level,RuleTitle,Channel,EventID,Details,MitreTactics,MitreTechnique,RuleFile
+2025-11-08 05:14:22.118,high,Bulk HR Files Archived,Sysmon,11,HR_All_Employees.zip (104MB) created in Documents,Collection,T1560.001,bulk_archive_created.yml
+2025-11-08 05:01:14.001,med,7-Zip Used to Compress HR Folder,Sysmon,1,7z.exe a HR_All_Employees.zip .\HR\*,Collection,T1560.001,sevenzip_archive.yml
+2025-11-08 05:02:11.001,info,Large File Written to Documents,Sysmon,11,HR_All_Employees.zip created,Collection,T1074.001,large_file_created.yml

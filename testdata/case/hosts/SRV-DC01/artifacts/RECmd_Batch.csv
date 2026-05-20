@@ -1,0 +1,4 @@
+LastWriteTimestamp,KeyPath,ValueName,ValueData,Category,Comment
+2025-11-08 03:48:22.118,HKLM\SAM\Domains\Account\Users\helpdesk2,UserName,helpdesk2,Persistence,Newly created user with privileged group membership
+2025-11-08 03:49:00.001,HKLM\SAM\Domains\Builtin\Aliases\Administrators,Members,helpdesk2;Administrator,Privilege Escalation,Domain Admins group modified
+2024-08-22 14:00:00.000,HKLM\SYSTEM\CurrentControlSet\Services\Kerberos\Parameters,SupportedEncryptionTypes,0x7,Configuration,Includes RC4 (legacy)

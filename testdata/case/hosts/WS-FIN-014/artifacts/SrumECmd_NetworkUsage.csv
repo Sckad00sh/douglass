@@ -1,0 +1,6 @@
+Timestamp,AppId,UserName,InterfaceLuid,BytesSent,BytesRecvd,L2ProfileId
+2025-11-08 04:18:00.000,C:\Users\jbeck\AppData\Roaming\rclone.exe,jbeck,1689399632855040,4294967296,2048576,corp-wifi
+2025-11-08 03:14:22.881,C:\Users\jbeck\Downloads\mimikatz.exe,jbeck,1689399632855040,8192,12288,corp-wifi
+2025-11-08 03:00:18.221,C:\Program Files\Google\Chrome\Application\chrome.exe,jbeck,1689399632855040,2147483,524288000,corp-wifi
+2025-11-08 04:12:14.119,C:\ProgramData\Microsoft\Vault\svchost.exe,SYSTEM,1689399632855040,524288,1048576,corp-wifi
+2025-11-08 02:45:00.000,C:\Users\jbeck\Downloads\TeamViewer_Setup.exe,jbeck,1689399632855040,1024,28156000,corp-wifi

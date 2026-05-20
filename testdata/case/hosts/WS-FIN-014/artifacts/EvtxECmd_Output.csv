@@ -1,0 +1,11 @@
+TimeCreated,EventId,Level,Provider,Channel,MapDescription,UserName,PayloadData1
+2025-11-08 03:14:22.881,4688,Information,Microsoft-Windows-Security-Auditing,Security,A new process has been created,CORP\jbeck,NewProcessName: C:\Users\jbeck\Downloads\mimikatz.exe
+2025-11-08 03:16:04.221,7045,Information,Service Control Manager,System,A service was installed,SYSTEM,Service Name: PSEXESVC
+2025-11-08 03:18:51.122,4663,Information,Microsoft-Windows-Security-Auditing,Security,An attempt was made to access an object,SYSTEM,ObjectName: lsass.exe
+2025-11-08 04:25:11.221,1102,Warning,Microsoft-Windows-Eventlog,Security,The audit log was cleared,CORP\jbeck,SubjectUserName: jbeck
+2025-11-08 04:12:08.221,1,Information,Microsoft-Windows-Sysmon,Microsoft-Windows-Sysmon/Operational,Process Create,SYSTEM,Image: C:\ProgramData\Microsoft\Vault\svchost.exe
+2025-11-08 04:18:00.000,3,Information,Microsoft-Windows-Sysmon,Microsoft-Windows-Sysmon/Operational,Network connection,CORP\jbeck,DestinationHostname: remote.acme-files.com DestinationPort: 443
+2025-11-08 03:32:11.110,4104,Warning,Microsoft-Windows-PowerShell,Microsoft-Windows-PowerShell/Operational,Script Block Logging,CORP\jbeck,ScriptBlockText: $cred = Get-Credential
+2025-11-08 02:48:11.001,11,Information,Microsoft-Windows-Sysmon,Microsoft-Windows-Sysmon/Operational,File Created,CORP\jbeck,TargetFilename: C:\Users\jbeck\Downloads\invoice_overdue.pdf.exe
+2025-11-08 04:21:00.221,4688,Information,Microsoft-Windows-Security-Auditing,Security,A new process has been created,CORP\jbeck,NewProcessName: C:\Windows\Temp\cleanup.bat
+2025-11-08 04:01:34.117,11,Information,Microsoft-Windows-Sysmon,Microsoft-Windows-Sysmon/Operational,File Created,CORP\jbeck,TargetFilename: C:\Users\jbeck\AppData\Roaming\rclone.conf
