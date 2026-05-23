@@ -358,16 +358,17 @@ func (s *Store) LoadArtifact(hostID, artifactID string) (*model.Artifact, error)
 		return nil, err
 	}
 	art := &model.Artifact{
-		ID:         t.ID,
-		Name:       t.Name,
-		Icon:       t.Icon,
-		Category:   t.Category,
-		Tool:       t.Tool,
-		SourceFile: sum.SourceFile,
-		Columns:    t.Columns,
-		Rows:       rows,
-		RowCount:   len(rows),
-		AlertCount: sum.AlertCount,
+		ID:          t.ID,
+		Name:        t.Name,
+		Icon:        t.Icon,
+		Category:    t.Category,
+		Tool:        t.Tool,
+		SourceFile:  sum.SourceFile,
+		Columns:     t.Columns,
+		Rows:        rows,
+		RowCount:    len(rows),
+		AlertCount:  sum.AlertCount,
+		PrimaryTime: t.PrimaryTime,
 	}
 
 	s.mu.Lock()

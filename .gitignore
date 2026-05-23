@@ -1,0 +1,60 @@
+# --- Go build artifacts ---
+# The Windows binary we ship; never check in builds.
+artifact-review
+artifact-review.exe
+*.exe
+*.test
+*.out
+dist/
+bin/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# --- Editor / OS noise ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Case data and analyst artifacts ---
+# Real DFIR case folders MUST NOT be committed. These can contain PII,
+# IOCs, customer data, or material under legal hold.
+#
+# testdata/case/ DOES get versioned -- its fixtures (WS-EXEC-002,
+# WS-FIN-014) are synthetic and required by the test suite. Use a
+# DIFFERENT path for real cases (e.g. C:\Cases\<id>\) so they never
+# land inside the repo by accident.
+/cases/
+/output/
+*.csv
+!testdata/**/*.csv
+*.evtx
+*.dat
+*.hive
+!testdata/**/*.dat
+Empty_Artifacts.txt
+
+# --- Preprocessor runtime junk ---
+# The PS1 emits a run-zimmerman.log per host; never commit those.
+run-zimmerman.log
+*.log
+
+# --- Third-party tool installers / runtimes ---
+# Analysts often drop these next to the source while bootstrapping a VM.
+windowsdesktop-runtime-*.exe
+ZimmermanTools/
+hayabusa/
+hayabusa-*.zip
+
+# --- Marks / per-user UI state ---
+# marks.json lives in the case folder, but stray copies sometimes appear.
+marks.json
+
+# --- Misc ---
+*.tar.gz
+*.zip

@@ -735,9 +735,12 @@
 }
 
 /* ---- column resize grip on each <th> ---- */
-.artifact-table thead th {
-  position: relative;       /* anchor for the absolutely-positioned grip */
-}
+/* Note: we don't override `position` on the th here. The `position: sticky`
+   set in app.css already establishes a containing block for the
+   absolutely-positioned .col-grip below, AND keeps the header row pinned
+   to the top of .table-scroll during vertical scroll. An earlier version
+   set `position: relative` here, which silently clobbered the sticky --
+   resulting in headers that scrolled away with the data. */
 .artifact-table thead th .col-grip {
   position: absolute;
   top: 0;
@@ -892,4 +895,238 @@ body.drawer-resizing * {
 }
 .chip.warn:hover {
   background: rgba(220, 70, 70, 0.18);
+}
+
+/* ---- cross-artifact correlation: pivot strip in row drawer ---- */
+.pivot-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.pivot-section-head {
+  margin: 6px 0 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg-3);
+  font-weight: 600;
+}
+.pivot-empty {
+  font-size: 11px;
+  color: var(--fg-3);
+  padding: 4px 0;
+  font-style: italic;
+}
+.pivot-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pivot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 4px 8px;
+  color: var(--fg-2);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  max-width: 100%;
+}
+.pivot-btn:hover:not([disabled]) {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.pivot-btn[disabled] {
+  opacity: 0.5;
+  cursor: progress;
+}
+.pivot-btn-kind {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 1px 5px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.pivot-btn-label {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.pivot-btn-val {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.pivot-btn.time-btn {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+}
+.pivot-anchor-hint {
+  font-size: 10.5px;
+  color: var(--fg-3);
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  padding: 2px 0;
+}
+.pivot-loading {
+  font-size: 11px;
+  color: var(--fg-3);
+  padding: 8px 0;
+  font-style: italic;
+}
+
+.pivot-result {
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  background: var(--bg-1);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pivot-result-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-3);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.pivot-result-kind {
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+.pivot-result-needle {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  color: var(--fg-2);
+  font-weight: 600;
+}
+.pivot-group { margin-top: 4px; }
+.pivot-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 3px 0;
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.pivot-group-head:hover { color: var(--fg); }
+.pivot-group-caret { width: 10px; color: var(--fg-3); font-size: 9px; }
+.pivot-group-icon { width: 16px; }
+.pivot-group-name { font-weight: 600; }
+.pivot-group-count {
+  color: var(--fg-3);
+  font-size: 10.5px;
+}
+.pivot-group-list {
+  margin-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+.pivot-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  padding: 2px 0;
+}
+.pivot-row-when {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  color: var(--fg-3);
+  flex-shrink: 0;
+  min-width: 170px;
+}
+.pivot-row-what {
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pivot-show-all {
+  align-self: flex-start;
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 10.5px;
+  padding: 4px 0;
+}
+.pivot-show-all:hover { text-decoration: underline; }
+
+/* ---- correlation tab (time-window view) ---- */
+.corr-anchor {
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.corr-window {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  color: var(--accent);
+  margin-left: 4px;
+}
+.corr-body {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg);
+  padding: 14px 16px 24px;
+}
+.corr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.corr-event {
+  display: grid;
+  grid-template-columns: 180px 60px 220px 1fr 70px;
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  font-size: 12px;
+}
+.corr-event:hover { background: var(--bg-2); }
+.corr-event.anchor {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+}
+.corr-when {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.corr-delta {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  color: var(--accent);
+  text-align: right;
+}
+.corr-art {
+  color: var(--fg-2);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.corr-what {
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

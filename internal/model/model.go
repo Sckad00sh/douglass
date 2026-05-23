@@ -30,6 +30,12 @@ type ArtifactType struct {
 	Tool     string `json:"tool"`     // source tool, e.g. "Hayabusa"
 	Category string `json:"category"` // grouping label
 	File     string `json:"file"`     // example/canonical source filename
+	// PrimaryTime names the column whose value is the canonical timestamp
+	// for this artifact type. Used by cross-artifact time-window
+	// correlation to merge events across artifacts onto one timeline.
+	// Empty string means "no canonical time column" -- such artifacts are
+	// skipped during time-window correlation but still pivotable.
+	PrimaryTime string `json:"primaryTime,omitempty"`
 }
 
 // Column is a typed column definition used by the front-end table.
@@ -67,6 +73,11 @@ type Artifact struct {
 	Rows        []Row    `json:"rows"`         //
 	RowCount    int      `json:"rowCount"`     //
 	AlertCount  int      `json:"alertCount"`   // # rows with crit|high severity
+	// PrimaryTime mirrors ArtifactType.PrimaryTime so the front-end can
+	// run cross-artifact time-window correlation without needing a
+	// separate types lookup. Empty string if the artifact has no
+	// canonical timestamp column (skip during time correlation).
+	PrimaryTime string   `json:"primaryTime,omitempty"`
 }
 
 // Host represents one machine's artifact collection.

@@ -1105,6 +1105,17 @@ function render() {
     restoreTlScrollTab = prevTl.dataset.tabKey || null;
   }
 
+  // Same for the correlation tab's body. Toggling artifact-filter chips
+  // would otherwise jump the analyst back to the top of a long event
+  // window.
+  let restoreCorrScrollTop = null;
+  let restoreCorrScrollTab = null;
+  const prevCorr = document.querySelector('.corr-body');
+  if (prevCorr) {
+    restoreCorrScrollTop = prevCorr.scrollTop;
+    restoreCorrScrollTab = prevCorr.dataset.tabKey || null;
+  }
+
   root.innerHTML = '';
 
   const totalMarks = state.marks.length;
@@ -1159,6 +1170,12 @@ function render() {
   const newTl = document.querySelector('.tl-body');
   if (newTl && restoreTlScrollTab && newTl.dataset.tabKey === restoreTlScrollTab) {
     newTl.scrollTop = restoreTlScrollTop;
+  }
+
+  // Same for the correlation tab body.
+  const newCorr = document.querySelector('.corr-body');
+  if (newCorr && restoreCorrScrollTab && newCorr.dataset.tabKey === restoreCorrScrollTab) {
+    newCorr.scrollTop = restoreCorrScrollTop;
   }
 }
 
@@ -1475,6 +1492,7 @@ function tabIcon(t) {
   if (t.kind === 'global-timeline') return '🌐';
   if (t.kind === 'host-timeline') return '⏱';
   if (t.kind === 'host-overview') return '📊';
+  if (t.kind === 'correlation') return '🔗';
   const host = state.hosts.find(h => h.id === t.hostId);
   const art = host && (host.artifacts || []).find(a => a.id === t.artifactId);
   return (art && art.icon) || '·';
@@ -1485,6 +1503,7 @@ function renderTabBody(tab) {
   if (tab.kind === 'host-timeline') return renderTimeline(tab.hostId);
   if (tab.kind === 'global-timeline') return renderTimeline('');
   if (tab.kind === 'host-overview') return renderHostOverview(tab.hostId);
+  if (tab.kind === 'correlation') return renderCorrelation(tab);
   return renderEmpty('Unknown tab', '');
 }
 
@@ -2101,7 +2120,18 @@ function renderTable(art, rows, ui, tab) {
       class: 'data-row' + (visibleIdx % 2 === 1 ? ' zebra' : '') +
         (isSel ? ' selected' : '') + (mark ? ' marked' : ''),
       style: { height: ROW_H + 'px' },
-      onclick: () => { ui.selectedRow = visibleIdx; render(); },
+      onclick: () => {
+        if (ui.selectedRow !== visibleIdx) {
+          // Different row -> the cross-artifact pivot result was scoped
+          // to the previous row, so wipe it. Otherwise the drawer would
+          // confusingly show a panel for a row the user isn't looking at.
+          ui.pivotResult = null;
+          ui.pivotExpanded = new Set();
+          ui.pivotShowAll = new Set();
+        }
+        ui.selectedRow = visibleIdx;
+        render();
+      },
     },
       $('td', { class: 'mark-cell' },
         $('span', {
@@ -2406,7 +2436,7 @@ function renderDrawer(art, rows, ui, tab, drawerHeight) {
     ),
     $('div', { class: 'detail-col' },
       $('h4', null, `Cross-Artifact Pivots · ${tab.hostId}`),
-      renderPivots(row, tab.hostId, tab.artifactId),
+      renderPivots(row, tab.hostId, tab.artifactId, ui),
     ),
   );
 }
@@ -2462,55 +2492,645 @@ function renderRowKV(row, art) {
   return dl;
 }
 
-function renderPivots(row, hostId, currentArtId) {
-  // Two strips: timestamp neighbours, and fuzzy filename matches across
-  // other artifacts on this host.
+function renderPivots(row, hostId, currentArtId, ui) {
+  // The pivots column has two sections:
+  //   1. Pivot buttons -- one per pivotable field (hash/path/filename) in
+  //      this row. Clicking loads every artifact on the host, runs the
+  //      pivot, and shows match counts per artifact with click-to-jump.
+  //   2. Time-window button -- builds a chronological merge of every
+  //      row from every artifact within +/- N minutes of this row's
+  //      primary timestamp. Opens as a new correlation tab.
+  //
+  // ui.pivotResult holds the most recent in-place pivot result so it
+  // survives the row's drawer re-renders (e.g. when toggling marks).
+  // ui.pivotBusy is true while the load + scan is in flight.
+
   const host = state.hosts.find(h => h.id === hostId);
   if (!host) return $('div');
+  const currentArt = state.artifactCache[`${hostId}|${currentArtId}`];
+  if (!currentArt) return $('div');
 
-  const baseTs = extractTimestamp(row);
-  const fname = (row.FileName || row.ExecutableName || '').toLowerCase();
+  const pivotFields = pivotFieldsForArtifact(currentArt)
+    .map(({ col, kind }) => {
+      const raw = row[col.key];
+      if (raw == null || raw === '') return null;
+      const normalized = normalizePivotValue(kind, raw);
+      if (!normalized) return null;
+      return { col, kind, raw: String(raw), normalized };
+    })
+    .filter(Boolean);
 
-  const strip = $('div', { class: 'timeline-strip' });
-  strip.appendChild($('h4', { style: { margin: '0 0 4px', textTransform: 'uppercase', fontSize: '10.5px', letterSpacing: '0.6px', color: 'var(--fg-3)' } },
-    baseTs ? `±5 min around ${baseTs}` : 'Neighbouring events'));
+  // Primary timestamp for this row (used by the time-window button).
+  const primaryTime = currentArt.primaryTime
+    ? parseArtifactTime(row[currentArt.primaryTime])
+    : null;
 
-  // We can only pivot into artifacts that are already cached. Surface the
-  // ones that aren't with a hint.
-  const otherIds = (host.artifacts || []).map(a => a.id).filter(id => id !== currentArtId);
-  let any = false;
-  for (const oid of otherIds) {
-    const a = state.artifactCache[`${hostId}|${oid}`];
-    if (!a) continue;
-    any = true;
-    // find rows whose label/path contains our fname (if any)
-    let matches = a.rows;
-    if (fname) {
-      matches = matches.filter(r =>
-        Object.values(r).some(v => String(v).toLowerCase().includes(fname))
-      ).slice(0, 3);
-    } else {
-      matches = matches.slice(0, 2);
+  const strip = $('div', { class: 'pivot-strip' });
+
+  // --- pivot buttons ---
+  strip.appendChild($('h4', { class: 'pivot-section-head' }, 'Pivot to other artifacts'));
+
+  if (pivotFields.length === 0) {
+    strip.appendChild($('div', { class: 'pivot-empty' },
+      'No pivot fields (hash / path / filename) in this row.'));
+  } else {
+    const btnRow = $('div', { class: 'pivot-buttons' });
+    for (const pf of pivotFields) {
+      const label = pf.col.label || pf.col.key;
+      btnRow.appendChild($('button', {
+        class: 'pivot-btn',
+        title: `Find this ${pf.kind} in other artifacts: ${pf.raw}`,
+        disabled: ui.pivotBusy ? 'disabled' : false,
+        onclick: async () => {
+          ui.pivotBusy = true;
+          ui.pivotResult = null;
+          render();
+          try {
+            const loaded = await ensureAllArtifactsLoaded(hostId);
+            const result = runPivot(hostId, pf.kind, pf.raw, loaded);
+            // Filter out the current artifact -- of course the row
+            // matches itself; surface only OTHER artifacts.
+            result.byArtifact = result.byArtifact.filter(g => g.artifactId !== currentArtId);
+            ui.pivotResult = {
+              field: label,
+              kind: pf.kind,
+              needle: pf.raw,
+              groups: result.byArtifact,
+            };
+          } catch (e) {
+            toast('pivot failed: ' + (e.message || e), true);
+          } finally {
+            ui.pivotBusy = false;
+            render();
+          }
+        },
+      },
+        $('span', { class: 'pivot-btn-kind' }, pf.kind),
+        $('span', { class: 'pivot-btn-label' }, label),
+        $('span', { class: 'pivot-btn-val' }, pf.raw.length > 28 ? pf.raw.slice(0, 25) + '...' : pf.raw),
+      ));
     }
-    for (const r of matches) {
-      const sev = deriveSeverity(oid, r);
-      const item = $('div', { class: 'tl-item ' + (sev === 'crit' ? 'crit' : sev === 'high' ? 'warn' : '') },
-        $('span', { class: 'when' }, extractTimestamp(r) || '—'),
-        $('span', { class: 'what' },
-          $('strong', { style: { color: 'var(--fg-2)' } }, a.icon + ' ' + a.name + ' — '),
-          extractLabel(r)),
-      );
-      strip.appendChild(item);
+    strip.appendChild(btnRow);
+  }
+
+  // --- pivot result, if any ---
+  // Guard against stale results: if the stored result was computed for a
+  // value that no longer appears as a pivot field on the currently
+  // selected row (e.g. the user filtered the table and a different row
+  // got auto-selected), drop the result rather than showing matches
+  // unrelated to what the analyst is now looking at.
+  if (ui.pivotResult && pivotFields.length > 0) {
+    const stillValid = pivotFields.some(pf =>
+      pf.kind === ui.pivotResult.kind && pf.raw === ui.pivotResult.needle);
+    if (!stillValid) {
+      ui.pivotResult = null;
+      ui.pivotExpanded = new Set();
+      ui.pivotShowAll = new Set();
     }
   }
-  if (!any) {
-    strip.appendChild($('div', { style: { fontSize: '11px', color: 'var(--fg-3)', padding: '6px 0' } },
-      'Open another artifact tab on this host to enable cross-artifact pivots.'));
+
+  if (ui.pivotBusy) {
+    strip.appendChild($('div', { class: 'pivot-loading' }, 'Loading artifacts and searching...'));
+  } else if (ui.pivotResult) {
+    strip.appendChild(renderPivotResult(ui.pivotResult, hostId, ui));
   }
+
+  // --- time-window section ---
+  strip.appendChild($('h4', { class: 'pivot-section-head' }, 'Time window'));
+  if (!primaryTime) {
+    strip.appendChild($('div', { class: 'pivot-empty' },
+      currentArt.primaryTime
+        ? `No parseable timestamp in this row's ${currentArt.primaryTime} field.`
+        : 'This artifact type has no canonical timestamp column.'));
+  } else {
+    const windowRow = $('div', { class: 'pivot-buttons' });
+    for (const m of PIVOT_WINDOWS_MIN) {
+      const label = m < 60 ? `\u00b1${m} min` : `\u00b1${m / 60} hr`;
+      windowRow.appendChild($('button', {
+        class: 'pivot-btn time-btn',
+        title: `Show all rows from all artifacts within ${label} of this event`,
+        onclick: async () => {
+          ui.pivotBusy = true;
+          render();
+          try {
+            const loaded = await ensureAllArtifactsLoaded(hostId);
+            const events = runTimeWindow(hostId, primaryTime, m, loaded);
+            // Stash the result on a global slot keyed by anchor so a new
+            // tab can pick it up. Then open the tab.
+            const anchorIso = primaryTime.toISOString();
+            const key = `${hostId}|${anchorIso}|${m}`;
+            state.correlationCache = state.correlationCache || {};
+            state.correlationCache[key] = {
+              hostId,
+              anchorIso,
+              anchorLabel: row[currentArt.primaryTime] || anchorIso,
+              windowMin: m,
+              sourceArtifactId: currentArtId,
+              events,
+            };
+            openTab({
+              kind: 'correlation',
+              hostId,
+              artifactId: '',
+              correlationKey: key,
+              label: `${currentArt.icon || ''} ${row[currentArt.primaryTime] || ''} ${label}`.trim(),
+            });
+          } catch (e) {
+            toast('time window failed: ' + (e.message || e), true);
+          } finally {
+            ui.pivotBusy = false;
+            render();
+          }
+        },
+      }, label));
+    }
+    strip.appendChild(windowRow);
+    strip.appendChild($('div', { class: 'pivot-anchor-hint' },
+      `Anchored at ${row[currentArt.primaryTime]}`));
+  }
+
   return strip;
 }
 
-// ---------------------- host overview view ----------------------
+// renderPivotResult shows the result panel for an in-place pivot.
+// Per the design choice, this is top-50-with-show-all per artifact group.
+// Each group is collapsible; the row count is shown alongside the
+// artifact name.
+function renderPivotResult(result, hostId, ui) {
+  const wrap = $('div', { class: 'pivot-result' });
+  wrap.appendChild($('div', { class: 'pivot-result-head' },
+    $('span', null, `Matches for `),
+    $('span', { class: 'pivot-result-kind' }, result.kind),
+    $('span', null, ` `),
+    $('span', { class: 'pivot-result-needle' }, result.needle),
+    $('span', { class: 'grow' }),
+    $('button', {
+      class: 'linkbtn',
+      onclick: () => { ui.pivotResult = null; render(); },
+    }, 'clear'),
+  ));
+
+  if (result.groups.length === 0) {
+    wrap.appendChild($('div', { class: 'pivot-empty' },
+      'No matches in other artifacts on this host.'));
+    return wrap;
+  }
+
+  ui.pivotExpanded = ui.pivotExpanded || new Set();
+  ui.pivotShowAll = ui.pivotShowAll || new Set();
+
+  for (const group of result.groups) {
+    const expanded = ui.pivotExpanded.has(group.artifactId);
+    const showAll = ui.pivotShowAll.has(group.artifactId);
+    const TOP_N = 50;
+    const visible = showAll ? group.matches : group.matches.slice(0, TOP_N);
+    const overflow = group.matches.length - visible.length;
+
+    const groupEl = $('div', { class: 'pivot-group' });
+    groupEl.appendChild($('div', {
+      class: 'pivot-group-head',
+      onclick: () => {
+        if (ui.pivotExpanded.has(group.artifactId)) ui.pivotExpanded.delete(group.artifactId);
+        else ui.pivotExpanded.add(group.artifactId);
+        render();
+      },
+    },
+      $('span', { class: 'pivot-group-caret' }, expanded ? '\u25BC' : '\u25B6'),
+      $('span', { class: 'pivot-group-icon' }, group.icon),
+      $('span', { class: 'pivot-group-name' }, group.name),
+      $('span', { class: 'pivot-group-count' }, `${group.matches.length} match${group.matches.length === 1 ? '' : 'es'}`),
+      $('span', { class: 'grow' }),
+      $('button', {
+        class: 'linkbtn',
+        onclick: (e) => {
+          e.stopPropagation();
+          // Jump to that artifact with the value pre-filled as a column
+          // filter on a compatible pivot field. For hash, only match hash
+          // columns. For path/filename, match either (mirrors the
+          // interplay in runPivot).
+          const targetArt = state.artifactCache[`${hostId}|${group.artifactId}`];
+          if (!targetArt) return;
+          const compatibleKinds = result.kind === 'hash'
+            ? ['hash']
+            : ['path', 'filename'];
+          // Prefer a column matching the SAME kind as the source, fall
+          // back to the cross-kind option. This puts the filter on a
+          // FullPath column (when pivoting from a path) instead of a
+          // FileName column when both are available.
+          const targetCol =
+            (targetArt.columns || []).find(c => pivotKindFor(c.key) === result.kind) ||
+            (targetArt.columns || []).find(c => compatibleKinds.includes(pivotKindFor(c.key)));
+          openTab({
+            kind: 'artifact',
+            hostId,
+            artifactId: group.artifactId,
+            label: `${state.hosts.find(h => h.id === hostId).name} \u00b7 ${targetArt.name}`,
+          });
+          // Pre-fill a column filter on the target tab so the user lands
+          // already filtered. When the source was a path but the target
+          // column is filename-kind, use the basename so the filter still
+          // matches; otherwise use the full needle.
+          setTimeout(() => {
+            const ta = getTabState(state.activeTab);
+            if (!ta.colFilters) ta.colFilters = {};
+            if (targetCol) {
+              const targetKind = pivotKindFor(targetCol.key);
+              let filterVal = result.needle;
+              if (result.kind === 'path' && targetKind === 'filename') {
+                // Strip down to basename so the short-form column matches.
+                filterVal = normalizePivotValue('filename', result.needle);
+              }
+              ta.colFilters[targetCol.key] = `"${filterVal}"`;
+              if (!ta.openFilterCols) ta.openFilterCols = new Set();
+              ta.openFilterCols.add(targetCol.key);
+            } else {
+              ta.filter = result.needle;
+            }
+            render();
+          }, 0);
+        },
+      }, 'open \u2192'),
+    ));
+
+    if (expanded) {
+      const list = $('div', { class: 'pivot-group-list' });
+      for (const r of visible) {
+        list.appendChild($('div', { class: 'pivot-row' },
+          $('span', { class: 'pivot-row-when' }, extractTimestamp(r) || '\u2014'),
+          $('span', { class: 'pivot-row-what' }, extractLabel(r)),
+        ));
+      }
+      if (overflow > 0) {
+        list.appendChild($('button', {
+          class: 'pivot-show-all',
+          onclick: (e) => {
+            e.stopPropagation();
+            ui.pivotShowAll.add(group.artifactId);
+            render();
+          },
+        }, `Show all ${group.matches.length} matches (${overflow} more)`));
+      }
+      groupEl.appendChild(list);
+    }
+    wrap.appendChild(groupEl);
+  }
+  return wrap;
+}
+
+// ---------------------- cross-artifact correlation ----------------------
+//
+// Two related features live here:
+//
+//   PIVOT: from a row in artifact A, find every row in artifacts B..N on
+//   the same host whose value in a pivot field (hash, path, filename)
+//   matches. Triggered from the row drawer; opens a side panel listing
+//   match counts per artifact with a click-to-jump action that pre-fills
+//   that artifact's per-column filter.
+//
+//   TIME WINDOW: from a row in artifact A with a known timestamp, build
+//   a merged chronological list of every row from every artifact whose
+//   primary timestamp falls within +/- N minutes. Opens a new tab.
+//
+// Both features need every artifact on the host loaded, which means
+// firing /api/artifact requests for any not yet cached. We do this
+// lazily at correlation-trigger time (not at host-open) so a casual
+// host-glance stays fast.
+
+const PIVOT_WINDOWS_MIN = [1, 5, 15, 60, 360];   // selectable +/-N minute options
+const DEFAULT_PIVOT_WINDOW_MIN = 5;
+
+// pivotKindFor returns 'hash' | 'path' | 'filename' | null for a column,
+// based on its key name. Used to mark which row-drawer fields are
+// clickable for cross-artifact pivots.
+//
+// The classification is suffix/contains-based. Both "Path" and "ParentPath"
+// are paths; both "FileName" and "OriginalFileName" are filenames. We
+// distinguish them by checking "filename" patterns first so "filename"
+// wins over "path" if both could apply (which can't happen with current
+// EZ Tools column names anyway).
+const pivotKindFor = (colKey) => {
+  if (/^(sha1|md5|sha256|hash)$/i.test(colKey)) return 'hash';
+  // The explicit path names (SourceFile, SourceFilename) are paths to the
+  // raw source artifact on disk -- check before the generic filename$
+  // pattern below, since "SourceFilename" ends with "filename" too.
+  if (/^(sourcefile|sourcefilename)$/i.test(colKey)) return 'path';
+  // Filename-like names: bare "FileName", "OriginalFileName",
+  // "ExecutableName". These are short basenames, not full paths.
+  if (/(filename|executablename)$/i.test(colKey)) return 'filename';
+  // Anything else ending in "path".
+  if (/path$/i.test(colKey)) return 'path';
+  return null;
+};
+
+// normalizePivotValue prepares a raw cell value for cross-artifact match.
+// For hashes: lowercase + strip non-hex. For paths: lowercase, strip the
+// kernel/global prefixes \??\ and \\?\, and normalize / -> \. Keeps the
+// comparison tolerant of cosmetic format differences across tools.
+const normalizePivotValue = (kind, raw) => {
+  if (raw == null) return '';
+  let s = String(raw).trim();
+  if (!s) return '';
+  if (kind === 'hash') {
+    return s.toLowerCase().replace(/[^0-9a-f]/g, '');
+  }
+  if (kind === 'path' || kind === 'filename') {
+    // Strip the kernel/NT-style \??\ prefix and the UNC-style \\?\ prefix.
+    // These appear in different DFIR sources (registry vs Win32 APIs)
+    // for the same underlying file; stripping makes matches portable.
+    s = s.replace(/^\\\?\?\\/, '');     // leading \??\
+    s = s.replace(/^\\\\\?\\/, '');     // leading \\?\
+    s = s.replace(/\//g, '\\');
+    s = s.toLowerCase();
+    if (kind === 'filename') {
+      const idx = s.lastIndexOf('\\');
+      if (idx >= 0) s = s.slice(idx + 1);
+    }
+    return s;
+  }
+  return s.toLowerCase();
+};
+
+// pivotFieldsForArtifact scans an artifact's columns and returns those
+// whose keys identify a pivotable kind. The drawer shows pivot affordances
+// only for these.
+const pivotFieldsForArtifact = (art) => {
+  if (!art || !art.columns) return [];
+  const out = [];
+  for (const c of art.columns) {
+    const kind = pivotKindFor(c.key);
+    if (kind) out.push({ col: c, kind });
+  }
+  return out;
+};
+
+// ensureAllArtifactsLoaded fires /api/artifact for every artifact on the
+// host that isn't already in state.artifactCache. Returns a Promise that
+// resolves to an array of {artifactId, art} once all are loaded (or
+// failed). Failures are tolerated -- the artifact is simply omitted from
+// the correlation result -- so one bad CSV doesn't break the feature.
+async function ensureAllArtifactsLoaded(hostId) {
+  const host = state.hosts.find(h => h.id === hostId);
+  if (!host) return [];
+  const summaries = host.artifacts || [];
+  const pending = [];
+  for (const s of summaries) {
+    const key = `${hostId}|${s.id}`;
+    if (state.artifactCache[key]) continue;
+    pending.push(
+      api.artifact(hostId, s.id)
+        .then(a => { state.artifactCache[key] = a; })
+        .catch(e => {
+          console.warn(`correlation: failed to load ${s.id} for ${hostId}:`, e);
+        })
+    );
+  }
+  if (pending.length > 0) {
+    toast(`loading ${pending.length} artifact(s) for correlation\u2026`);
+    await Promise.all(pending);
+  }
+  // Return what we now have, in stable order.
+  return summaries
+    .map(s => ({ artifactId: s.id, art: state.artifactCache[`${hostId}|${s.id}`] }))
+    .filter(x => x.art);
+}
+
+// runPivot searches every loaded artifact on the host for rows whose
+// pivot-eligible columns contain a value matching `needle`.
+// Returns { kind, needle, byArtifact: [{ artifactId, name, matches: [rows] }] }.
+// "matches" is the row objects themselves (not row indices) so callers
+// can render previews directly.
+//
+// Kind interplay:
+//   * 'hash'     -- strict equality only. Different hash algos must not
+//                   cross-match. Only columns of hash-kind are scanned.
+//   * 'path'     -- scans path-kind AND filename-kind columns. A short
+//                   filename like "powershell.exe" in Prefetch DOES match
+//                   a path needle "C:\Windows\System32\powershell.exe"
+//                   because they reference the same executable.
+//   * 'filename' -- scans both kinds too. Path-kind cells are reduced to
+//                   their basename for the comparison.
+//
+// This is the right behavior for DFIR pivots: an analyst clicking a hash
+// wants only same-hash matches, but an analyst clicking a path or filename
+// wants every artifact that references that file, regardless of whether
+// the referencing artifact stored a full path or just the basename.
+function runPivot(hostId, kind, needle, loaded) {
+  const normalizedNeedle = normalizePivotValue(kind, needle);
+  if (!normalizedNeedle) return { kind, needle, byArtifact: [] };
+
+  // For path/filename, also derive the bare basename of the needle. Used
+  // for matching short-form columns (Prefetch ExecutableName, etc).
+  let needleBasename = '';
+  if (kind === 'path' || kind === 'filename') {
+    needleBasename = normalizePivotValue('filename', needle);
+  }
+
+  const byArtifact = [];
+  for (const { artifactId, art } of loaded) {
+    if (!art.rows || !art.rows.length) continue;
+
+    // Build the candidate column set. For hash, strict. For path/filename,
+    // include both kinds so we can compare across short and long forms.
+    const candidateCols = [];
+    for (const c of (art.columns || [])) {
+      const colKind = pivotKindFor(c.key);
+      if (kind === 'hash' && colKind === 'hash') {
+        candidateCols.push({ key: c.key, colKind });
+      } else if ((kind === 'path' || kind === 'filename') &&
+                 (colKind === 'path' || colKind === 'filename')) {
+        candidateCols.push({ key: c.key, colKind });
+      }
+    }
+    if (candidateCols.length === 0) continue;
+
+    const matches = [];
+    for (const r of art.rows) {
+      for (const { key, colKind } of candidateCols) {
+        const raw = r[key];
+        if (raw == null || raw === '') continue;
+        // Normalize the cell using its OWN kind, not the needle's. This
+        // is what makes a path-kind cell like "C:\Windows\foo.exe"
+        // comparable to a filename-kind needle: we normalize once for
+        // path semantics, then derive the basename for the cross-form
+        // comparison below.
+        const cellAsPath = normalizePivotValue('path', raw);
+        const cellBasename = normalizePivotValue('filename', raw);
+
+        let hit = false;
+        if (kind === 'hash') {
+          if (cellAsPath === normalizedNeedle) hit = true; // path-norm of a hex string == lowercased hex string
+        } else {
+          // Equal-full-path match.
+          if (cellAsPath === normalizedNeedle) hit = true;
+          // Path needle ends with the cell's basename or vice versa.
+          else if (needleBasename && cellBasename === needleBasename) hit = true;
+          // Path needle contains the cell's path as a final component.
+          else if (cellAsPath && normalizedNeedle.endsWith('\\' + cellAsPath)) hit = true;
+          // Cell contains the path needle as a final component.
+          else if (cellAsPath.endsWith('\\' + normalizedNeedle)) hit = true;
+        }
+        if (hit) { matches.push(r); break; }
+      }
+    }
+
+    if (matches.length > 0) {
+      const host = state.hosts.find(h => h.id === hostId);
+      const summary = ((host && host.artifacts) || [])
+        .find(a => a.id === artifactId);
+      byArtifact.push({
+        artifactId,
+        name: summary ? summary.name : artifactId,
+        icon: summary ? summary.icon : '?',
+        matches,
+      });
+    }
+  }
+  return { kind, needle, byArtifact };
+}
+
+// parseArtifactTime tries to parse a row's primary-time value into a
+// JS Date. Handles the common EZ Tools / Hayabusa format
+// "YYYY-MM-DD HH:MM:SS.fff" -- ISO compatible once a "T" replaces the
+// space. Returns null on parse failure so callers can skip that row.
+function parseArtifactTime(value) {
+  if (!value) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+  // Try as-is first, then with T substitution.
+  let d = new Date(s);
+  if (isNaN(d.getTime())) {
+    d = new Date(s.replace(' ', 'T'));
+  }
+  if (isNaN(d.getTime())) return null;
+  return d;
+}
+
+// runTimeWindow finds all rows from all loaded artifacts whose primary
+// timestamp falls within [anchor - window, anchor + window] minutes.
+// Anchored on the (already-parsed) Date `anchorTime`. Returns a flat
+// chronological array of { artifactId, name, icon, time, row }.
+function runTimeWindow(hostId, anchorTime, windowMin, loaded) {
+  const lo = new Date(anchorTime.getTime() - windowMin * 60 * 1000);
+  const hi = new Date(anchorTime.getTime() + windowMin * 60 * 1000);
+  const events = [];
+  const host = state.hosts.find(h => h.id === hostId);
+  const artifactSummaries = (host && host.artifacts) || [];
+  for (const { artifactId, art } of loaded) {
+    const primary = art.primaryTime;
+    if (!primary) continue;
+    if (!art.rows || !art.rows.length) continue;
+    const summary = artifactSummaries.find(a => a.id === artifactId);
+    const name = summary ? summary.name : artifactId;
+    const icon = summary ? summary.icon : '?';
+    for (const r of art.rows) {
+      const t = parseArtifactTime(r[primary]);
+      if (!t) continue;
+      if (t < lo || t > hi) continue;
+      events.push({ artifactId, name, icon, time: t, row: r });
+    }
+  }
+  events.sort((a, b) => a.time - b.time);
+  return events;
+}
+
+// renderCorrelation displays the time-window correlation tab: a merged
+// chronological list of every event from every artifact on the host
+// whose primary timestamp falls within the window. Events are grouped
+// visually by artifact (color-coded icon prefix) but sorted by time.
+function renderCorrelation(tab) {
+  const cache = (state.correlationCache && state.correlationCache[tab.correlationKey]) || null;
+  if (!cache) {
+    return $('main', { class: 'main' },
+      renderEmpty('Correlation expired',
+        'This time-window view\'s data was discarded. Open the source row and re-run the correlation.'));
+  }
+
+  const host = state.hosts.find(h => h.id === cache.hostId);
+  const hostName = host ? host.name : cache.hostId;
+  const ui = getTabState(state.activeTab);
+  ui.corrArtifactFilter = ui.corrArtifactFilter || new Set();
+
+  const artIds = [...new Set(cache.events.map(e => e.artifactId))];
+  let events = cache.events;
+  if (ui.corrArtifactFilter.size > 0) {
+    events = events.filter(e => ui.corrArtifactFilter.has(e.artifactId));
+  }
+
+  return $('main', { class: 'main' },
+    $('div', { class: 'toolbar' },
+      $('div', { class: 'crumbs' },
+        $('span', { class: 'host link', onclick: () => openTab({
+          kind: 'host-overview', hostId: cache.hostId, artifactId: '',
+          label: `${hostName} \u00b7 Overview`,
+        }) }, hostName),
+        $('span', { class: 'sep' }, '/'),
+        $('span', { class: 'cur' }, 'Time Window'),
+      ),
+    ),
+    $('div', { class: 'filter-bar' },
+      $('span', { class: 'corr-anchor' },
+        $('strong', null, 'Anchor: '),
+        cache.anchorLabel || cache.anchorIso,
+        $('span', { class: 'corr-window' }, ` \u00b1${cache.windowMin < 60 ? cache.windowMin + ' min' : (cache.windowMin / 60) + ' hr'}`),
+      ),
+      $('span', { class: 'tb-spacer' }),
+      ...artIds.map(aid => {
+        const summary = (host && host.artifacts || []).find(a => a.id === aid);
+        const label = summary ? summary.name : aid;
+        const on = ui.corrArtifactFilter.has(aid);
+        return $('button', {
+          class: 'chip' + (on ? ' on' : ''),
+          onclick: () => {
+            if (on) ui.corrArtifactFilter.delete(aid);
+            else ui.corrArtifactFilter.add(aid);
+            render();
+          },
+        }, summary ? summary.icon + ' ' : '', label);
+      }),
+      $('span', { style: { fontSize: '11px', color: 'var(--fg-3)', marginLeft: '8px' } },
+        `${events.length} of ${cache.events.length} events`),
+    ),
+    $('div', { class: 'corr-body', 'data-tab-key': `correlation|${cache.hostId}|${tab.correlationKey}` },
+      events.length === 0
+        ? $('div', { class: 'tl-empty' },
+            $('div', { class: 'ico' }, '\u2300'),
+            $('h3', null, 'No events in window'),
+            $('p', null, 'Try a larger window from the source row.'),
+          )
+        : renderCorrelationList(events, cache),
+    ),
+  );
+}
+
+function renderCorrelationList(events, cache) {
+  const list = $('div', { class: 'corr-list' });
+  const anchorMs = new Date(cache.anchorIso).getTime();
+  for (const ev of events) {
+    const isAnchor = ev.artifactId === cache.sourceArtifactId && Math.abs(ev.time.getTime() - anchorMs) < 1000;
+    const deltaSec = Math.round((ev.time.getTime() - anchorMs) / 1000);
+    const deltaLabel = deltaSec === 0 ? '0s'
+                     : Math.abs(deltaSec) < 60 ? `${deltaSec > 0 ? '+' : ''}${deltaSec}s`
+                     : Math.abs(deltaSec) < 3600 ? `${deltaSec > 0 ? '+' : ''}${Math.round(deltaSec / 60)}m`
+                     : `${deltaSec > 0 ? '+' : ''}${(deltaSec / 3600).toFixed(1)}h`;
+    list.appendChild($('div', { class: 'corr-event' + (isAnchor ? ' anchor' : '') },
+      $('span', { class: 'corr-when' }, ev.time.toISOString().replace('T', ' ').replace('Z', '')),
+      $('span', { class: 'corr-delta' }, deltaLabel),
+      $('span', { class: 'corr-art' }, ev.icon, ' ', ev.name),
+      $('span', { class: 'corr-what' }, extractLabel(ev.row) || '\u2014'),
+      $('button', {
+        class: 'linkbtn',
+        onclick: () => openTab({
+          kind: 'artifact',
+          hostId: cache.hostId,
+          artifactId: ev.artifactId,
+          label: `${state.hosts.find(h => h.id === cache.hostId).name} \u00b7 ${ev.name}`,
+        }),
+      }, 'open \u2192'),
+    ));
+  }
+  return list;
+}
+
 
 // renderHostOverview shows the host's identity (KPI strip across the top)
 // followed by a grid of clickable artifact tiles. This is the landing
