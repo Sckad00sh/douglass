@@ -36,6 +36,14 @@ type ArtifactType struct {
 	// Empty string means "no canonical time column" -- such artifacts are
 	// skipped during time-window correlation but still pivotable.
 	PrimaryTime string `json:"primaryTime,omitempty"`
+	// ContextFields lists, in display order, the column keys whose values
+	// should be shown alongside each row in a cross-artifact pivot result.
+	// The intent is "enough context to tell whether this match matters" --
+	// typically file path / executable / user / host / EID / size.
+	// Values longer than ~120 chars are truncated by the front-end so a
+	// huge payload (script block, RECmd ValueData) doesn't blow up the
+	// pivot panel.
+	ContextFields []string `json:"contextFields,omitempty"`
 }
 
 // Column is a typed column definition used by the front-end table.
@@ -77,7 +85,10 @@ type Artifact struct {
 	// run cross-artifact time-window correlation without needing a
 	// separate types lookup. Empty string if the artifact has no
 	// canonical timestamp column (skip during time correlation).
-	PrimaryTime string   `json:"primaryTime,omitempty"`
+	PrimaryTime string `json:"primaryTime,omitempty"`
+	// ContextFields mirrors ArtifactType.ContextFields. Front-end uses
+	// it to render a per-row context line in cross-artifact pivot results.
+	ContextFields []string `json:"contextFields,omitempty"`
 }
 
 // Host represents one machine's artifact collection.

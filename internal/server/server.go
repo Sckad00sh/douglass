@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,8 +53,108 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/marks", s.handleMarks)
 	mux.HandleFunc("/api/marks/", s.handleMarkByID)
 	mux.Handle("/", s.staticHandler())
-	return mux
+	return localOnly(mux)
 }
+
+// localOnly wraps a handler with two defenses against attackers reaching
+// the local API through the analyst's browser:
+//
+//  1. Host header allowlist. DNS rebinding lets a remote origin trick a
+//     browser into sending requests to 127.0.0.1, but the Host header
+//     will still contain the original (attacker-controlled) hostname.
+//     We accept only 127.0.0.1[:port], localhost[:port], [::1][:port],
+//     which is what the user's own UI sends.
+//
+//  2. CSRF guard via custom header on mutating verbs. Browsers won't send
+//     a custom X-Requested-By header on simple cross-origin requests
+//     without a CORS preflight, and we never return Access-Control-Allow-*
+//     headers, so the preflight fails -- blocking the real request before
+//     it's sent. (GETs are also state-mutating in /api/open's case via
+//     side effect of opening a case, so we apply the guard to all
+//     /api/* requests except /api/health.)
+//
+// Both defenses are belt-and-braces. The Host check alone would suffice
+// against most DNS rebinding tools, but the CSRF header also protects
+// against a misconfigured browser proxy or a future change that loosens
+// the Host check.
+func localOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Defense-in-depth headers. Set BEFORE any short-circuit reply
+		// so even error responses carry them.
+		//
+		// CSP is strict because the UI is purely same-origin: one
+		// external <script src="app.js"> and a few <link rel="stylesheet">,
+		// no inline script, no inline style="..." attributes (checked at
+		// audit time). 'none' on frame-ancestors and form-action denies
+		// clickjacking and form-action exfiltration. base-uri 'none'
+		// prevents a <base> tag from being injected to redirect resource
+		// loads.
+		h := w.Header()
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self'; "+
+				"style-src 'self'; "+
+				"img-src 'self' data:; "+
+				"font-src 'self'; "+
+				"connect-src 'self'; "+
+				"frame-ancestors 'none'; "+
+				"form-action 'none'; "+
+				"base-uri 'none'")
+		// Belt-and-braces clickjacking guard for older browsers that
+		// honor X-Frame-Options but not CSP frame-ancestors.
+		h.Set("X-Frame-Options", "DENY")
+		// Don't let the browser sniff text/plain as text/html.
+		h.Set("X-Content-Type-Options", "nosniff")
+		// No referrer leak when the analyst clicks an external link --
+		// not that we have any, but defense in depth.
+		h.Set("Referrer-Policy", "no-referrer")
+
+		if !hostAllowed(r.Host) {
+			http.Error(w, "forbidden: bad Host header", http.StatusForbidden)
+			return
+		}
+		// CSRF guard for API calls. /api/health is exempt so a simple
+		// curl-from-shell sanity check works.
+		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/health" {
+			if r.Header.Get("X-Requested-By") != "douglas" {
+				http.Error(w, "forbidden: missing X-Requested-By", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostAllowed returns true if the request's Host header points at a
+// loopback address. r.Host may or may not include a port:
+//   - "127.0.0.1:8080"  -> port present, IPv4
+//   - "127.0.0.1"       -> bare IPv4
+//   - "localhost:8080"  -> port present, name
+//   - "localhost"       -> bare name
+//   - "[::1]:8080"      -> port present, IPv6 (bracketed)
+//   - "::1"             -> bare IPv6 (no brackets, no port)
+//
+// We use net.SplitHostPort to peel off a port when one's present; if
+// SplitHostPort errors (no port), we treat the whole string as the host.
+// That handles bare IPv6 correctly -- a naive LastIndexByte(':') strategy
+// would chop "::1" into ":" because every colon in IPv6 looks like a
+// port separator.
+func hostAllowed(host string) bool {
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		// No port present -- treat the whole value as the host.
+		h = host
+	}
+	// Strip brackets in case SplitHostPort left them on (it shouldn't,
+	// but defense in depth for malformed inputs).
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	switch h {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
+}
+
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -97,6 +198,9 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "POST required")
 		return
 	}
+	// Cap the body so a malicious client can't OOM us with a huge JSON
+	// document. 64 KB is generous for {"dir": "C:\\path\\to\\case"}.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var body struct {
 		Dir string `json:"dir"`
 	}
@@ -313,6 +417,10 @@ func (s *Server) handleMarks(w http.ResponseWriter, r *http.Request) {
 		host := r.URL.Query().Get("host")
 		writeJSON(w, http.StatusOK, s.marks.List(host))
 	case http.MethodPost:
+		// Cap body so a malicious client can't OOM us. Marks are tiny
+		// (id, host, artifact, row key, optional note) -- 256 KB is far
+		// more than enough.
+		r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
 		var m model.Mark
 		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())

@@ -67,8 +67,10 @@ func (s *Store) Open(dir string) error {
 	}
 
 	cs := &model.Case{Dir: abs}
-	// Load case.json if present.
-	if b, err := os.ReadFile(filepath.Join(abs, "case.json")); err == nil {
+	// Load case.json if present. Cap the read so a malformed/huge
+	// case.json (planted on disk by something we don't trust) can't OOM
+	// the analyst's machine.
+	if b, err := readCappedFile(filepath.Join(abs, "case.json"), 1<<20); err == nil {
 		_ = json.Unmarshal(b, &cs.Info)
 	}
 	if cs.Info.ID == "" {
@@ -203,8 +205,8 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 		Name: name,
 		Tag:  "WS", // default; overridden by host.json
 	}
-	// host.json metadata
-	if b, err := os.ReadFile(filepath.Join(dir, "host.json")); err == nil {
+	// host.json metadata (cap read size so a huge planted file can't OOM).
+	if b, err := readCappedFile(filepath.Join(dir, "host.json"), 1<<20); err == nil {
 		_ = json.Unmarshal(b, &host)
 		if host.ID == "" {
 			host.ID = name
@@ -358,17 +360,18 @@ func (s *Store) LoadArtifact(hostID, artifactID string) (*model.Artifact, error)
 		return nil, err
 	}
 	art := &model.Artifact{
-		ID:          t.ID,
-		Name:        t.Name,
-		Icon:        t.Icon,
-		Category:    t.Category,
-		Tool:        t.Tool,
-		SourceFile:  sum.SourceFile,
-		Columns:     t.Columns,
-		Rows:        rows,
-		RowCount:    len(rows),
-		AlertCount:  sum.AlertCount,
-		PrimaryTime: t.PrimaryTime,
+		ID:            t.ID,
+		Name:          t.Name,
+		Icon:          t.Icon,
+		Category:      t.Category,
+		Tool:          t.Tool,
+		SourceFile:    sum.SourceFile,
+		Columns:       t.Columns,
+		Rows:          rows,
+		RowCount:      len(rows),
+		AlertCount:    sum.AlertCount,
+		PrimaryTime:   t.PrimaryTime,
+		ContextFields: t.ContextFields,
 	}
 
 	s.mu.Lock()
@@ -432,4 +435,20 @@ func parseCSV(path string) ([]model.Row, error) {
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+// readCappedFile reads up to max bytes from a file. If the file is
+// larger than max, the read succeeds with the first max bytes only --
+// callers treat that as a normal short read (typically the unmarshal
+// fails, falling back to defaults). Used to harden metadata reads
+// (case.json, host.json) against a planted huge file OOMing the
+// process. The cap is per-file: a 1 MB metadata budget per artifact
+// is far above any legitimate workflow.
+func readCappedFile(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, max))
 }

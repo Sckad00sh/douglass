@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,11 +50,19 @@ func (s *Store) Open(caseDir string) error {
 	s.marks = map[string]*model.Mark{}
 	s.mu.Unlock()
 
-	b, err := os.ReadFile(filepath.Join(caseDir, "marks.json"))
+	// Cap the read so a planted/corrupted marks.json can't OOM us.
+	// 16 MB allows for tens of thousands of marks; far above any
+	// real-world case.
+	f, err := os.Open(filepath.Join(caseDir, "marks.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		s.once.Do(s.startFlusher)
 		return nil
 	}
+	if err != nil {
+		return err
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 16<<20))
+	_ = f.Close()
 	if err != nil {
 		return err
 	}

@@ -1042,22 +1042,67 @@ body.drawer-resizing * {
 }
 .pivot-row {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 8px;
   font-size: 11px;
-  padding: 2px 0;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.pivot-row:last-child {
+  border-bottom: 0;
 }
 .pivot-row-when {
   font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
   color: var(--fg-3);
   flex-shrink: 0;
-  min-width: 170px;
+  min-width: 150px;
+  padding-top: 1px;       /* nudge to align with the chips visually */
 }
 .pivot-row-what {
+  /* Fallback path -- only used when an artifact has no ContextFields
+     declared. Keeps the single-line ellipsis layout. */
   color: var(--fg-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.pivot-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  flex: 1;
+  min-width: 0;
+}
+.pivot-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 2px;
+  padding: 1px 6px;
+  max-width: 100%;
+}
+.pivot-chip-k {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-faint);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.pivot-chip-v {
+  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Allow values to be long-ish but cap so a single chip can't dominate
+     the row. Truncation in JS keeps the actual string under ~120 chars;
+     the CSS cap matters only when there's a chip wider than the column. */
+  max-width: 360px;
 }
 .pivot-show-all {
   align-self: flex-start;
@@ -1095,7 +1140,10 @@ body.drawer-resizing * {
   display: grid;
   grid-template-columns: 180px 60px 220px 1fr 70px;
   gap: 12px;
-  align-items: baseline;
+  /* top-align so that when the chip box wraps to multiple lines, the
+     other cells (timestamp, delta, artifact, button) stay anchored at
+     the top of the row rather than drifting to the middle. */
+  align-items: start;
   padding: 6px 8px;
   background: var(--bg-1);
   border: 1px solid var(--border-soft);

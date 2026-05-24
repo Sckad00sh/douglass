@@ -26,6 +26,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "mft", Name: "MFT", Icon: "🗂", Tool: "MFTECmd",
 			Category: "Filesystem", File: "$MFT_Output.csv",
 			PrimaryTime: "Created0x10",
+			ContextFields: []string{"ParentPath", "FileSize", "Extension", "InUse"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)MFT.*Output.*\.csv$`),
 		Columns: []model.Column{
@@ -47,6 +48,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "amcache", Name: "Amcache File Entries", Icon: "⚙", Tool: "AmcacheParser",
 			Category: "Execution", File: "Amcache_UnassociatedFileEntries.csv",
 			PrimaryTime: "FileKeyLastWriteTimestamp",
+			ContextFields: []string{"FullPath", "ProductName", "SHA1"},
 		},
 		// Match the UnassociatedFileEntries CSV — the main forensically
 		// interesting Amcache output, listing executable history not tied
@@ -76,6 +78,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "amcache-associated", Name: "Amcache Associated", Icon: "⚙", Tool: "AmcacheParser",
 			Category: "Execution", File: "Amcache_AssociatedFileEntries.csv",
 			PrimaryTime: "FileKeyLastWriteTimestamp",
+			ContextFields: []string{"FullPath", "ProductName", "SHA1"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)Amcache.*_AssociatedFileEntries\.csv$`),
 		Columns: []model.Column{
@@ -94,6 +97,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "amcache-programs", Name: "Amcache Programs", Icon: "⚙", Tool: "AmcacheParser",
 			Category: "Execution", File: "Amcache_ProgramEntries.csv",
 			PrimaryTime: "KeyLastWriteTimestamp",
+			ContextFields: []string{"Name", "Publisher", "Version"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)Amcache.*_ProgramEntries\.csv$`),
 		Columns: []model.Column{
@@ -110,6 +114,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "amcache-devices", Name: "Amcache Devices", Icon: "⚙", Tool: "AmcacheParser",
 			Category: "Execution", File: "Amcache_DeviceContainers.csv",
 			PrimaryTime: "KeyLastWriteTimestamp",
+			ContextFields: []string{"Model", "Manufacturer", "DeviceClass"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)Amcache.*_Device(Containers|Pnps)\.csv$`),
 		Columns: []model.Column{
@@ -125,6 +130,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "amcache-drivers", Name: "Amcache Drivers", Icon: "⚙", Tool: "AmcacheParser",
 			Category: "Execution", File: "Amcache_DriveBinaries.csv",
 			PrimaryTime: "KeyLastWriteTimestamp",
+			ContextFields: []string{"DriverName", "DriverCompany", "Service"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)Amcache.*_Drive(Binaries|Packages)\.csv$`),
 		Columns: []model.Column{
@@ -141,6 +147,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "amcache-shortcuts", Name: "Amcache Shortcuts", Icon: "⚙", Tool: "AmcacheParser",
 			Category: "Execution", File: "Amcache_ShortCuts.csv",
 			PrimaryTime: "KeyLastWriteTimestamp",
+			ContextFields: []string{"ShortcutPath", "Description"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)Amcache.*_ShortCuts\.csv$`),
 		Columns: []model.Column{
@@ -153,6 +160,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "shimcache", Name: "Shimcache", Icon: "🧩", Tool: "AppCompatCacheParser",
 			Category: "Execution", File: "SYSTEM_AppCompatCache.csv",
 			PrimaryTime: "LastModifiedTimeUTC",
+			ContextFields: []string{"Path", "Executed", "Duplicate"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)AppCompatCache.*\.csv$`),
 		// Match the actual EZ Tools AppCompatCacheParser output columns:
@@ -173,6 +181,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "prefetch-timeline", Name: "Prefetch Timeline", Icon: "⚡", Tool: "PECmd",
 			Category: "Execution", File: "PECmd_Output_Timeline.csv",
 			PrimaryTime: "RunTime",
+			ContextFields: []string{"ExecutableName"},
 		},
 		// PECmd emits PECmd_Output_Timeline.csv with one row per recorded
 		// execution time (flattened from the multi-time-per-file layout in
@@ -196,6 +205,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "prefetch", Name: "Prefetch", Icon: "⚡", Tool: "PECmd",
 			Category: "Execution", File: "PECmd_Output.csv",
 			PrimaryTime: "LastRun",
+			ContextFields: []string{"ExecutableName", "RunCount", "Volume0Name"},
 		},
 		// Anchor on the literal suffix "PECmd_Output.csv" so we match
 		// both the canonical name and any date-prefixed variant, but not
@@ -222,6 +232,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "evtx", Name: "Event Logs", Icon: "📜", Tool: "EvtxECmd",
 			Category: "Logs", File: "EvtxECmd_Output.csv",
 			PrimaryTime: "TimeCreated",
+			ContextFields: []string{"EventId", "Provider", "UserName", "Computer", "MapDescription"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)EvtxECmd_Output.*\.csv$`),
 		Columns: []model.Column{
@@ -240,6 +251,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "hayabusa", Name: "Hayabusa Detections", Icon: "🦅", Tool: "Hayabusa",
 			Category: "Detections", File: "hayabusa_timeline.csv",
 			PrimaryTime: "Timestamp",
+			ContextFields: []string{"RuleTitle", "Level", "Computer", "Channel"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)hayabusa.*timeline.*\.csv$`),
 		// Hayabusa's csv-timeline output has exactly these columns:
@@ -264,6 +276,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "srum", Name: "SRUM Network", Icon: "🌐", Tool: "SrumECmd",
 			Category: "System", File: "SrumECmd_NetworkUsage.csv",
 			PrimaryTime: "Timestamp",
+			ContextFields: []string{"AppId", "UserName", "BytesSent", "BytesRecvd"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)SrumECmd.*Network.*\.csv$`),
 		Columns: []model.Column{
@@ -281,6 +294,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "registry", Name: "Registry (RECmd)", Icon: "🔑", Tool: "RECmd",
 			Category: "Registry", File: "RECmd_Batch.csv",
 			PrimaryTime: "LastWriteTimestamp",
+			ContextFields: []string{"Category", "KeyPath", "ValueName", "ValueData"},
 		},
 		// Anchored to the suffix "RECmd_Batch*_Output.csv" (RECmd's default
 		// pattern is `{timestamp}_RECmd_Batch_{batchname}_Output.csv`)
@@ -307,6 +321,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "lnk", Name: "LNK Files", Icon: "🔗", Tool: "LECmd",
 			Category: "Filesystem", File: "LECmd_Output.csv",
 			PrimaryTime: "TargetModified",
+			ContextFields: []string{"LocalPath", "MachineId", "TargetCreated"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)\bLECmd_Output.*\.csv$`),
 		Columns: []model.Column{
@@ -324,6 +339,7 @@ var ArtifactTypes = []ArtifactType{
 			ID: "jumplist", Name: "Jump Lists", Icon: "↗", Tool: "JLECmd",
 			Category: "Execution", File: "JLECmd_Output.csv",
 			PrimaryTime: "LastModified",
+			ContextFields: []string{"TargetPath", "AppId", "EntryNumber"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)JLECmd_Output.*\.csv$`),
 		Columns: []model.Column{

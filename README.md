@@ -153,6 +153,34 @@ No third-party Go modules; everything's in the standard library.
 - The mark "row key" is a hash of a handful of high-signal columns and
   will be stable across re-parses of the same CSV. If you mark a row in
   a sparse CSV with no distinguishing columns, you may see drift.
-- Cross-artifact pivots in the detail drawer only show artifacts that
-  are already opened in another tab on the same host (so we don't load
-  every CSV into memory automatically).
+- Cross-artifact correlation (pivot + time-window) loads any uncached
+  artifacts for the host on first use, with a short loading toast.
+  Subsequent correlations are instant. There's no server-side index;
+  matching is in-browser, which is fine up to a few hundred thousand
+  rows but may feel sluggish on very large MFTs.
+
+## Security model
+
+The tool is intentionally localhost-only:
+
+- Default bind is `127.0.0.1:0` (loopback, random port). Override with
+  `--addr` only if you understand what you're doing. **Do not expose
+  this on a network.** It's a single-user analyst tool, not a service.
+- The HTTP server enforces a Host header allowlist (`127.0.0.1`,
+  `localhost`, `::1`). This blocks DNS rebinding attacks from a remote
+  webpage tricking your browser into talking to the local API.
+- API endpoints (except `/api/health`) require an `X-Requested-By:
+  douglas` header. Browsers won't send custom headers cross-origin
+  without a CORS preflight, and the server returns no CORS allow
+  headers, so cross-origin requests fail before reaching the handlers.
+- A strict Content-Security-Policy header (`default-src 'self'`) is set
+  on every response. All UI assets are same-origin and embedded in the
+  binary; the policy denies inline scripts, third-party origins, and
+  framing.
+- Request bodies are size-capped to prevent memory exhaustion
+  (`/api/open` 64 KB, `/api/marks` POST 256 KB). Metadata file reads
+  (`case.json`, `host.json`, `marks.json`) are also capped.
+
+If you ever need to expose the UI on a network for legitimate reasons
+(e.g. running on a dedicated review jumpbox), put it behind a reverse
+proxy that handles auth and TLS. Don't loosen the Host check.

@@ -12,7 +12,10 @@ const $ = (tag, props = {}, ...children) => {
     if (k === 'class') el.className = v;
     else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
-    else if (k === 'html') el.innerHTML = v;
+    // No innerHTML escape hatch. All children go through createTextNode
+    // (see appendChild below), which escapes by construction. CSV data
+    // from a compromised host can contain arbitrary HTML; routing it
+    // through innerHTML would be XSS.
     else if (v !== false && v != null) el.setAttribute(k, v);
   }
   const appendChild = (c) => {
@@ -51,7 +54,19 @@ const debounce = (fn, ms) => {
 };
 
 const fetchJSON = async (url, opts) => {
-  const r = await fetch(url, opts);
+  // Inject the CSRF guard header. The server requires X-Requested-By
+  // on every /api/* call (except /api/health). Browsers won't send a
+  // custom header on cross-origin requests without a CORS preflight,
+  // and we never return CORS allow-headers -- so an attacker page can't
+  // forge this header even via DNS rebinding.
+  const merged = {
+    ...opts,
+    headers: {
+      'X-Requested-By': 'douglas',
+      ...(opts && opts.headers),
+    },
+  };
+  const r = await fetch(url, merged);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 };
@@ -2652,6 +2667,87 @@ function renderPivots(row, hostId, currentArtId, ui) {
   return strip;
 }
 
+// rowContextChips returns the array of {label, val} chip data for a row
+// based on the artifact's declared ContextFields. Returns [] if the
+// artifact has no ContextFields or none of those fields are populated
+// in this row. Pure function -- no DOM. Callers wrap the chips in
+// whatever surrounding layout they need (pivot result rows, correlation
+// events, etc).
+function rowContextChips(row, art, truncAt) {
+  const TRUNC = truncAt || 120;
+  const fields = (art && art.contextFields) || [];
+  if (fields.length === 0) return [];
+  const chips = [];
+  for (const key of fields) {
+    const raw = row[key];
+    if (raw == null || raw === '') continue;
+    let val = String(raw).replace(/\s+/g, ' ').trim();
+    if (val.length > TRUNC) val = val.slice(0, TRUNC) + '\u2026';
+    // Find the column's friendly label, fall back to the raw key if the
+    // column isn't in the artifact's schema (an "extra" CSV field).
+    let label = key;
+    if (art && art.columns) {
+      const col = art.columns.find(c => c.key === key);
+      if (col && col.label) label = col.label;
+    }
+    chips.push({ label, val });
+  }
+  return chips;
+}
+
+// renderContextChips wraps chip data into a DOM span. Used by both the
+// pivot result rows and the correlation event view.
+function renderContextChips(chips) {
+  const box = $('span', { class: 'pivot-row-chips' });
+  for (const c of chips) {
+    box.appendChild($('span', { class: 'pivot-chip' },
+      $('span', { class: 'pivot-chip-k' }, c.label),
+      $('span', { class: 'pivot-chip-v' }, c.val),
+    ));
+  }
+  return box;
+}
+
+// renderPivotRowPreview renders one row inside a pivot result group with
+// just enough context for an analyst to decide whether to drill in.
+// Layout: timestamp on the left, then a series of "key=value" chips
+// for each ContextField declared on the artifact type. Long values
+// (descriptions, payloads, RECmd ValueData) are truncated to ~120 chars.
+// If the artifact has no ContextFields declared, we fall back to the
+// generic extractLabel for compatibility with any new artifact types
+// that haven't been curated yet.
+function renderPivotRowPreview(row, art) {
+  // Resolve timestamp: prefer the artifact's declared PrimaryTime field,
+  // fall back to the generic extractor.
+  let ts = '';
+  if (art && art.primaryTime && row[art.primaryTime]) {
+    ts = String(row[art.primaryTime]);
+  } else {
+    ts = extractTimestamp(row) || '';
+  }
+  // Trim sub-second precision down to seconds for compact display --
+  // EZ Tools emits 7-digit fractional seconds which is more precision
+  // than this preview needs.
+  ts = ts.replace(/(\d{2}:\d{2}:\d{2})\.\d+/, '$1');
+
+  const chips = rowContextChips(row, art);
+
+  // Build the row element. Timestamp first, then chips, then a fallback
+  // label if no chips materialised (artifact has no declared context or
+  // none of those columns had values in this row).
+  const el = $('div', { class: 'pivot-row' },
+    $('span', { class: 'pivot-row-when' }, ts || '\u2014'),
+  );
+  if (chips.length > 0) {
+    el.appendChild(renderContextChips(chips));
+  } else {
+    // No context fields hit -- show the generic extractLabel as a
+    // last-resort hint of what this row contains.
+    el.appendChild($('span', { class: 'pivot-row-what' }, extractLabel(row) || '\u2014'));
+  }
+  return el;
+}
+
 // renderPivotResult shows the result panel for an in-place pivot.
 // Per the design choice, this is top-50-with-show-all per artifact group.
 // Each group is collapsible; the row count is shown alongside the
@@ -2753,12 +2849,13 @@ function renderPivotResult(result, hostId, ui) {
     ));
 
     if (expanded) {
+      // Pull the actual artifact so we can use its primaryTime + the
+      // declared ContextFields for per-row context. Fallback is generic
+      // extractLabel if the artifact declared no context fields.
+      const targetArt = state.artifactCache[`${hostId}|${group.artifactId}`];
       const list = $('div', { class: 'pivot-group-list' });
       for (const r of visible) {
-        list.appendChild($('div', { class: 'pivot-row' },
-          $('span', { class: 'pivot-row-when' }, extractTimestamp(r) || '\u2014'),
-          $('span', { class: 'pivot-row-what' }, extractLabel(r)),
-        ));
+        list.appendChild(renderPivotRowPreview(r, targetArt));
       }
       if (overflow > 0) {
         list.appendChild($('button', {
@@ -3112,11 +3209,22 @@ function renderCorrelationList(events, cache) {
                      : Math.abs(deltaSec) < 60 ? `${deltaSec > 0 ? '+' : ''}${deltaSec}s`
                      : Math.abs(deltaSec) < 3600 ? `${deltaSec > 0 ? '+' : ''}${Math.round(deltaSec / 60)}m`
                      : `${deltaSec > 0 ? '+' : ''}${(deltaSec / 3600).toFixed(1)}h`;
+
+    // Look up the source artifact so we can build per-row context chips
+    // using its declared ContextFields. Same logic as the pivot result
+    // groups: declared fields produce key=value chips, fallback to
+    // extractLabel when nothing's declared or populated.
+    const art = state.artifactCache[`${cache.hostId}|${ev.artifactId}`];
+    const chips = rowContextChips(ev.row, art);
+    const whatCell = chips.length > 0
+      ? renderContextChips(chips)
+      : $('span', { class: 'corr-what' }, extractLabel(ev.row) || '\u2014');
+
     list.appendChild($('div', { class: 'corr-event' + (isAnchor ? ' anchor' : '') },
       $('span', { class: 'corr-when' }, ev.time.toISOString().replace('T', ' ').replace('Z', '')),
       $('span', { class: 'corr-delta' }, deltaLabel),
       $('span', { class: 'corr-art' }, ev.icon, ' ', ev.name),
-      $('span', { class: 'corr-what' }, extractLabel(ev.row) || '\u2014'),
+      whatCell,
       $('button', {
         class: 'linkbtn',
         onclick: () => openTab({
