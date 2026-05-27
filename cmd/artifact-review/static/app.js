@@ -857,6 +857,15 @@ const state = {
   artifactCache: {}, // key "host|art" -> full artifact
   searchHost: '',
   theme: loadTheme(),
+  // Upload-related state (v0.11.0).
+  // jobs: latest snapshot of /api/jobs response, keyed by job.id.
+  // jobsPanelCollapsed: persistence of the panel's collapse state per session.
+  // jobPollTimer: setInterval handle so we only poll while active jobs exist.
+  // dropPending: files currently waiting for a host pick / replace confirm.
+  jobs: {},
+  jobsPanelCollapsed: false,
+  jobPollTimer: null,
+  dropPending: null,
 };
 
 applyTheme(state.theme);
@@ -913,6 +922,78 @@ const api = {
     body: JSON.stringify(m),
   }),
   deleteMark: (id) => fetchJSON('/api/marks/' + encodeURIComponent(id), { method: 'DELETE' }),
+
+  // Jobs API (v0.11.0). listJobs is polled; cancelJob is fired on the
+  // job panel's cancel button. uploadFile is a special case below.
+  listJobs: () => fetchJSON('/api/jobs'),
+  cancelJob: (id) => fetchJSON('/api/jobs/' + encodeURIComponent(id), { method: 'DELETE' }),
+
+  // uploadFile is intentionally NOT a fetchJSON call. We use XMLHttpRequest
+  // for two reasons:
+  //   1. fetch's upload-progress story is poor across browsers; XHR's
+  //      onprogress fires reliably as bytes are sent.
+  //   2. We want a JS-side cancel handle for in-flight uploads; XHR has
+  //      xhr.abort() which is simpler than wiring an AbortController
+  //      through fetch + giving the UI a stable handle.
+  // Returns a promise resolving to the parsed JSON response, plus an
+  // 'abort' function on the returned promise object so callers can
+  // cancel.
+  uploadFile: (file, hostId, replace, onProgress) => {
+    const xhr = new XMLHttpRequest();
+    const qs = `host=${encodeURIComponent(hostId)}${replace ? '&replace=1' : ''}`;
+    const p = new Promise((resolve, reject) => {
+      xhr.open('POST', '/api/upload?' + qs, true);
+      xhr.setRequestHeader('X-Requested-By', 'douglas');
+      // Don't set Content-Type explicitly -- the browser sets it for
+      // FormData, including the boundary. Setting it ourselves would
+      // omit the boundary and break multipart parsing on the server.
+      if (typeof onProgress === 'function') {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) onProgress(e.loaded, e.total);
+        };
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch (e) { reject(new Error('bad JSON: ' + xhr.responseText)); }
+        } else {
+          // Server returns {error: "..."} for failures; surface that
+          // message verbatim if present so the UI can show it.
+          let msg = xhr.responseText || `HTTP ${xhr.status}`;
+          try {
+            const j = JSON.parse(xhr.responseText);
+            if (j && j.error) msg = j.error;
+          } catch (_) { /* leave raw */ }
+          const err = new Error(msg);
+          err.status = xhr.status;
+          reject(err);
+        }
+      };
+      xhr.onerror = () => reject(new Error('network error during upload'));
+      xhr.onabort = () => {
+        const err = new Error('upload cancelled');
+        err.aborted = true;
+        reject(err);
+      };
+      const form = new FormData();
+      form.append('file', file);
+      xhr.send(form);
+    });
+    p.abort = () => xhr.abort();
+    return p;
+  },
+
+  // Preprocess API (v0.13.0). Three endpoints:
+  //   GET  /api/preprocess         -> { available, interpreter, scriptPath }
+  //   GET  /api/preprocess/tools   -> { tools: [{id,label,tool}] }
+  //   POST /api/preprocess         -> { jobId, status }
+  preprocessInfo:  () => fetchJSON('/api/preprocess'),
+  preprocessTools: () => fetchJSON('/api/preprocess/tools'),
+  preprocessRun:   (cfg) => fetchJSON('/api/preprocess', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  }),
 };
 
 // ---------------------- toast ----------------------
@@ -925,6 +1006,875 @@ const toast = (msg, isErr = false) => {
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.remove(), 3000);
 };
+
+// ---------------------- uploads + jobs (v0.11.0) ----------------------
+//
+// Drag-and-drop upload UX. Two cooperating subsystems:
+//
+//   1. Drop handling. A window-level listener intercepts dragenter/drop
+//      events with files. We resolve the target host (active host on
+//      whichever tab is current, or modal prompt if none), confirm
+//      replacement on filename collision, and POST each file to
+//      /api/upload. The endpoint enqueues a job server-side.
+//
+//   2. Job panel. A floating widget polls /api/jobs every second while
+//      any non-terminal job exists. Polling stops automatically once
+//      all jobs are terminal, and starts on demand when an upload kicks
+//      off. Completed jobs auto-dismiss from the panel after a short
+//      delay so the panel doesn't grow unboundedly.
+//
+// CSV-passthrough only in v0.11.0 -- the server rejects non-CSV uploads
+// with a clear error pointing to v0.11.1. The UI doesn't pre-filter; we
+// let the server be the source of truth on accepted artifact types so
+// the error message stays consistent.
+
+// activeHostId returns the host the active tab is "about", or '' if no
+// tab is open or the active tab is the global timeline (no host context).
+const activeHostId = () => {
+  const t = state.tabs[state.activeTab];
+  if (!t) return '';
+  return t.hostId || '';
+};
+
+// kickJobPolling starts the /api/jobs poll loop if it isn't already
+// running. Polling stops automatically when no active jobs remain (see
+// pollJobs below).
+const kickJobPolling = () => {
+  if (state.jobPollTimer) return;
+  // Immediate poll + then every 1s.
+  pollJobs();
+  state.jobPollTimer = setInterval(pollJobs, 1000);
+};
+
+const pollJobs = async () => {
+  try {
+    const resp = await api.listJobs();
+    const incoming = {};
+    for (const j of (resp.jobs || [])) incoming[j.id] = j;
+    state.jobs = incoming;
+    // Stop polling if everything's terminal.
+    const anyActive = Object.values(incoming).some(j =>
+      j.status === 'queued' || j.status === 'running'
+    );
+    if (!anyActive && state.jobPollTimer) {
+      clearInterval(state.jobPollTimer);
+      state.jobPollTimer = null;
+    }
+    renderJobPanel();
+    // If any job transitioned to complete since the last poll, refresh
+    // the case so the new artifact shows in the sidebar.
+    const justCompleted = Object.values(incoming).filter(j =>
+      j.status === 'complete' && !state._seenComplete?.has(j.id)
+    );
+    if (justCompleted.length > 0) {
+      state._seenComplete = state._seenComplete || new Set();
+      for (const j of justCompleted) state._seenComplete.add(j.id);
+      // Re-fetch the case so the new artifact appears.
+      try {
+        const c = await api.case();
+        if (c.open) {
+          state.hosts = c.hosts || [];
+          render();
+        }
+      } catch (e) {
+        console.error('refresh after upload:', e);
+      }
+    }
+  } catch (e) {
+    console.error('job poll:', e);
+  }
+};
+
+// handleDroppedFiles is the top of the upload flow. Called from the
+// window-level drop event. Resolves the target host, then proceeds to
+// pre-flight checks (filename match) and upload.
+async function handleDroppedFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (files.length === 0) return;
+
+  // Reject folder drops. Files that came from a folder have webkit
+  // file APIs that expose webkitRelativePath. Browser folder-drag also
+  // produces 0-size entries we can detect, but the cleanest signal is
+  // checking for entry-via-getAsEntry isDirectory; for now we trust
+  // size==0 + no type as a folder signal and surface the error.
+  const folders = files.filter(f => f.size === 0 && !f.type);
+  if (folders.length > 0 && folders.length === files.length) {
+    toast('drop individual files, not folders', true);
+    return;
+  }
+
+  // Need at least one host in the case.
+  if (state.hosts.length === 0) {
+    toast('no hosts in this case yet — open or create a host first', true);
+    return;
+  }
+
+  // Resolve the target host: active tab's host if any, otherwise prompt.
+  let hostId = activeHostId();
+  if (!hostId) {
+    if (state.hosts.length === 1) {
+      hostId = state.hosts[0].id;
+    } else {
+      hostId = await openHostPickerModal(files);
+      if (!hostId) return; // user cancelled
+    }
+  }
+
+  // Process each file. Errors are toasted; a 409 triggers the replace
+  // confirmation flow. We do these sequentially so the user isn't
+  // bombarded with parallel modals; if multiple files all need replace
+  // prompts we surface them one at a time.
+  for (const file of files) {
+    await uploadOneFile(file, hostId, false);
+  }
+}
+
+// uploadOneFile posts a single file to /api/upload, handling the 409
+// replace prompt and threading progress updates into state.jobs.
+async function uploadOneFile(file, hostId, replace) {
+  // Pre-populate a fake job entry so the panel shows the upload before
+  // the server has assigned a real job ID. The real ID replaces this
+  // entry on the upload's response.
+  const tempId = 'upload_' + Math.random().toString(36).slice(2, 10);
+  state.jobs[tempId] = {
+    id: tempId,
+    kind: 'upload',
+    status: 'running',
+    hostId,
+    fileName: file.name,
+    progress: 'uploading 0%',
+    startedAt: new Date().toISOString(),
+    _local: true,           // not from server -- don't let polling overwrite
+    _abortHandle: null,
+  };
+  renderJobPanel();
+
+  try {
+    const promise = api.uploadFile(file, hostId, replace, (loaded, total) => {
+      const pct = total > 0 ? Math.round((loaded * 100) / total) : 0;
+      const j = state.jobs[tempId];
+      if (j) {
+        const mb = (n) => (n / (1024 * 1024)).toFixed(1);
+        j.progress = total > 0
+          ? `uploading ${mb(loaded)}/${mb(total)} MB (${pct}%)`
+          : `uploading ${mb(loaded)} MB`;
+        renderJobPanel();
+      }
+    });
+    state.jobs[tempId]._abortHandle = promise.abort;
+    const resp = await promise;
+    // Server returns a real jobId; drop the temp entry, polling will
+    // pick up the real job next tick.
+    delete state.jobs[tempId];
+    if (resp && resp.jobId) {
+      state.jobs[resp.jobId] = {
+        id: resp.jobId,
+        kind: 'upload',
+        status: 'queued',
+        hostId,
+        fileName: file.name,
+        progress: 'queued for processing',
+        startedAt: new Date().toISOString(),
+      };
+    }
+    kickJobPolling();
+    renderJobPanel();
+  } catch (err) {
+    delete state.jobs[tempId];
+    if (err.aborted) {
+      // Silent: cancelling is intentional.
+      renderJobPanel();
+      return;
+    }
+    if (err.status === 409 && !replace) {
+      // Existing artifact -- prompt for replace.
+      const ok = await openReplaceConfirmModal(file, hostId);
+      if (ok) {
+        await uploadOneFile(file, hostId, true);
+      }
+      return;
+    }
+    toast(`upload failed: ${err.message}`, true);
+    renderJobPanel();
+  }
+}
+
+// openHostPickerModal shows a modal listing the hosts and resolves with
+// the chosen hostId, or '' on cancel. Used when files are dropped on
+// the case overview (no active host).
+function openHostPickerModal(files) {
+  return new Promise((resolve) => {
+    document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+
+    const fileList = files.length === 1
+      ? `${files[0].name} (${formatBytes(files[0].size)})`
+      : `${files.length} files`;
+
+    let chosen = state.hosts[0]?.id || '';
+
+    const backdrop = $('div', {
+      class: 'modal-backdrop',
+      onclick: (e) => {
+        if (e.target === backdrop) { backdrop.remove(); resolve(''); }
+      },
+    });
+    const modal = $('div', {
+      class: 'modal upload-host-modal',
+      onclick: (e) => e.stopPropagation(),
+    });
+    modal.appendChild($('div', { class: 'modal-head' },
+      $('div', { class: 'ico' }, '⬆'),
+      $('h3', null, 'Upload to which host?'),
+      $('button', {
+        class: 'close',
+        title: 'close',
+        onclick: () => { backdrop.remove(); resolve(''); },
+      }, '✕'),
+    ));
+    const body = $('div', { class: 'modal-body' });
+    body.appendChild($('div', { class: 'upload-files-desc' }, `File: ${fileList}`));
+    body.appendChild($('div', { class: 'upload-host-list' }));
+    const list = body.lastChild;
+    for (const h of state.hosts) {
+      const artifactsCount = (h.artifacts || []).length;
+      const row = $('label', { class: 'upload-host-row' },
+        $('input', {
+          type: 'radio',
+          name: 'upload-host',
+          value: h.id,
+          checked: h.id === chosen,
+          onchange: () => { chosen = h.id; },
+        }),
+        $('span', { class: 'upload-host-name' }, h.name || h.id),
+        $('span', { class: 'upload-host-count' }, `${artifactsCount} artifact${artifactsCount === 1 ? '' : 's'}`),
+      );
+      list.appendChild(row);
+    }
+    modal.appendChild(body);
+    modal.appendChild($('div', { class: 'modal-foot' },
+      $('button', {
+        class: 'btn',
+        onclick: () => { backdrop.remove(); resolve(''); },
+      }, 'Cancel'),
+      $('button', {
+        class: 'btn primary',
+        onclick: () => { backdrop.remove(); resolve(chosen); },
+      }, 'Upload'),
+    ));
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+  });
+}
+
+// openReplaceConfirmModal asks for confirmation before overwriting an
+// existing artifact. Resolves true if the analyst confirmed, false on
+// cancel.
+function openReplaceConfirmModal(file, hostId) {
+  return new Promise((resolve) => {
+    document.querySelectorAll('.upload-confirm-modal').forEach(el => el.remove());
+    const host = state.hosts.find(h => h.id === hostId);
+    const hostLabel = host ? (host.name || host.id) : hostId;
+    const backdrop = $('div', {
+      class: 'modal-backdrop',
+      onclick: (e) => {
+        if (e.target === backdrop) { backdrop.remove(); resolve(false); }
+      },
+    });
+    const modal = $('div', {
+      class: 'modal upload-confirm-modal',
+      onclick: (e) => e.stopPropagation(),
+    });
+    modal.appendChild($('div', { class: 'modal-head' },
+      $('div', { class: 'ico' }, '⚠'),
+      $('h3', null, 'Replace existing artifact?'),
+      $('button', {
+        class: 'close',
+        title: 'close',
+        onclick: () => { backdrop.remove(); resolve(false); },
+      }, '✕'),
+    ));
+    modal.appendChild($('div', { class: 'modal-body' },
+      $('p', null, `${hostLabel} already has an artifact with this filename.`),
+      $('p', { class: 'upload-confirm-file' }, `File: ${file.name} (${formatBytes(file.size)})`),
+      $('p', { class: 'upload-confirm-warn' },
+        '⚠ This action cannot be undone. Marks on the existing artifact will be ',
+        'preserved if row keys match; otherwise they may become orphaned.'),
+    ));
+    modal.appendChild($('div', { class: 'modal-foot' },
+      $('button', {
+        class: 'btn',
+        onclick: () => { backdrop.remove(); resolve(false); },
+      }, 'Cancel'),
+      $('button', {
+        class: 'btn primary',
+        onclick: () => { backdrop.remove(); resolve(true); },
+      }, 'Replace artifact'),
+    ));
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+  });
+}
+
+// formatBytes returns a human-readable byte size. Cheap and lossy --
+// adequate for upload progress display.
+function formatBytes(n) {
+  if (n == null) return '?';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+// renderJobPanel rebuilds the bottom-right floating panel. Called on
+// every state.jobs change. Returns nothing -- mutates the DOM directly
+// so it doesn't have to be threaded through the main render() pipeline.
+function renderJobPanel() {
+  const existing = document.getElementById('job-panel');
+  const jobs = Object.values(state.jobs);
+  if (jobs.length === 0) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  const active = jobs.filter(j => j.status === 'queued' || j.status === 'running');
+  const done = jobs.filter(j => j.status === 'complete');
+  const failed = jobs.filter(j => j.status === 'failed' || j.status === 'cancelled');
+
+  const panel = $('div', { id: 'job-panel', class: 'job-panel' });
+  // Header with collapse toggle.
+  const headLabel = state.jobsPanelCollapsed
+    ? `${active.length} running · ${done.length} done${failed.length ? ' · ' + failed.length + ' failed' : ''}`
+    : `Jobs (${jobs.length})`;
+  panel.appendChild($('div', { class: 'job-panel-head' },
+    $('span', null, headLabel),
+    $('button', {
+      class: 'linkbtn',
+      title: state.jobsPanelCollapsed ? 'Expand' : 'Collapse',
+      onclick: () => {
+        state.jobsPanelCollapsed = !state.jobsPanelCollapsed;
+        renderJobPanel();
+      },
+    }, state.jobsPanelCollapsed ? '⌃' : '⌄'),
+  ));
+  if (!state.jobsPanelCollapsed) {
+    const body = $('div', { class: 'job-panel-body' });
+    // Newest first, mixing all states. Server returns this order; we
+    // also account for local upload entries.
+    const sorted = jobs.slice().sort((a, b) =>
+      String(b.startedAt).localeCompare(String(a.startedAt))
+    );
+    for (const j of sorted) {
+      body.appendChild(renderJobItem(j));
+    }
+    panel.appendChild(body);
+  }
+
+  if (existing) existing.replaceWith(panel);
+  else document.body.appendChild(panel);
+}
+
+function renderJobItem(j) {
+  const hostName = (state.hosts.find(h => h.id === j.hostId) || {}).name || j.hostId;
+  const icon =
+    j.status === 'queued' ? '⋯' :
+    j.status === 'running' ? '▶' :
+    j.status === 'complete' ? '✓' :
+    j.status === 'cancelled' ? '⊘' : '✗';
+  const cls = `job-item job-${j.status}`;
+  const card = $('div', { class: cls });
+  card.appendChild($('div', { class: 'job-line-1' },
+    $('span', { class: 'job-icon' }, icon),
+    $('span', { class: 'job-file' }, j.fileName || '(unnamed)'),
+  ));
+  card.appendChild($('div', { class: 'job-line-2' }, `${hostName} · ${j.progress || j.status}`));
+  if (j.status === 'failed' && j.error) {
+    card.appendChild($('div', { class: 'job-err' }, j.error));
+  }
+  if (j.status === 'complete' && j.resultId) {
+    card.appendChild($('button', {
+      class: 'linkbtn',
+      onclick: () => {
+        // Open the artifact tab and dismiss this entry.
+        const host = state.hosts.find(h => h.id === j.hostId);
+        const art = (host?.artifacts || []).find(a => a.id === j.resultId);
+        if (host && art) {
+          openTab({
+            kind: 'artifact',
+            hostId: host.id,
+            artifactId: art.id,
+            label: `${host.name} · ${art.name}`,
+          });
+        }
+        delete state.jobs[j.id];
+        renderJobPanel();
+      },
+    }, 'Open artifact →'));
+  }
+  // Cancel only meaningful for active jobs. For terminal ones we offer
+  // a dismiss button instead so the analyst can clear the panel.
+  if (j.status === 'queued' || j.status === 'running') {
+    card.appendChild($('button', {
+      class: 'linkbtn',
+      onclick: async () => {
+        // Two paths: locally-tracked upload (call its abort handle) vs
+        // server-tracked job (DELETE /api/jobs/{id}).
+        if (j._abortHandle) {
+          j._abortHandle();
+        } else {
+          try { await api.cancelJob(j.id); }
+          catch (e) { toast('cancel failed: ' + e.message, true); }
+        }
+      },
+    }, 'cancel'));
+  } else {
+    card.appendChild($('button', {
+      class: 'linkbtn',
+      onclick: () => { delete state.jobs[j.id]; renderJobPanel(); },
+    }, 'dismiss'));
+  }
+  return card;
+}
+
+// setupDropZone wires the window-level drag-and-drop handlers. Called
+// once at startup. Shows the overlay on dragenter (with files), hides
+// on dragleave/drop, and invokes handleDroppedFiles on drop.
+function setupDropZone() {
+  // Track nested dragenter/dragleave count so leaving a child element
+  // doesn't trigger overlay-off prematurely.
+  let depth = 0;
+
+  const showOverlay = () => {
+    let o = document.getElementById('drop-overlay');
+    if (!o) {
+      o = $('div', { id: 'drop-overlay', class: 'drop-overlay' });
+      const card = $('div', { class: 'drop-card' });
+      o.appendChild(card);
+      document.body.appendChild(o);
+    }
+    const card = o.firstChild;
+    card.innerHTML = '';
+    const hostId = activeHostId();
+    const host = hostId ? state.hosts.find(h => h.id === hostId) : null;
+    card.appendChild($('div', { class: 'drop-icon' }, '⬇'));
+    card.appendChild($('div', { class: 'drop-title' },
+      host ? `Drop to upload to ${host.name || host.id}` : 'Drop to upload'));
+    card.appendChild($('div', { class: 'drop-sub' },
+      host ? 'Files will be added to this host.' : 'You\'ll pick a host on the next step.'));
+    card.appendChild($('div', { class: 'drop-hint' },
+      'CSV passthrough only in v0.11.0. Raw artifacts (.evtx, $MFT, etc.) require v0.11.1.'));
+  };
+  const hideOverlay = () => {
+    const o = document.getElementById('drop-overlay');
+    if (o) o.remove();
+  };
+
+  // Track whether dragenter has files (vs internal drag like sortable
+  // rows in the future). The dataTransfer.types check works in all
+  // modern browsers.
+  const hasFiles = (e) => {
+    if (!e.dataTransfer) return false;
+    const t = e.dataTransfer.types;
+    if (!t) return false;
+    // Array.from for older browsers where types is a DOMStringList.
+    return Array.from(t).indexOf('Files') !== -1;
+  };
+
+  window.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth++;
+    showOverlay();
+  });
+  window.addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    // copy effect signals to the OS that we accept the drop.
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+  window.addEventListener('dragleave', (e) => {
+    if (!hasFiles(e)) return;
+    depth--;
+    if (depth <= 0) {
+      depth = 0;
+      hideOverlay();
+    }
+  });
+  window.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    hideOverlay();
+    handleDroppedFiles(e.dataTransfer.files);
+  });
+}
+
+// ---------------------- preprocess wizard (v0.13.0) ----------------------
+//
+// Modal that runs Run-ZimmermanTools.ps1 against a mounted image. The
+// PowerShell subprocess is spawned server-side; this UI is the form
+// (image path, output root, tool checkboxes, etc.) plus a live log
+// stream of the script's output during execution.
+//
+// Two entry points:
+//   - From the Import-case modal: a "Preprocess image" button next to "Open"
+//   - From an open case: a Settings menu item in the titlebar
+//
+// State machine: idle -> running -> {complete, failed}. The modal stays
+// open across the running state so the analyst sees streaming output
+// without alt-tabbing. On complete, an "Open case" button is offered.
+
+// state.preprocessInfo caches the GET /api/preprocess response so the
+// UI can decide synchronously whether to show wizard entry points.
+state.preprocessInfo = null;
+state.preprocessTools = null; // canonical -ToolFilter list
+
+// initPreprocess fetches the preprocessor availability and tool list
+// once at startup. If neither call succeeds the wizard entry points
+// just stay hidden -- there's nothing useful to do.
+async function initPreprocess() {
+  try {
+    const info = await api.preprocessInfo();
+    state.preprocessInfo = info;
+  } catch (e) {
+    state.preprocessInfo = { available: false };
+  }
+  if (state.preprocessInfo.available) {
+    try {
+      const t = await api.preprocessTools();
+      state.preprocessTools = t.tools || [];
+    } catch (e) {
+      state.preprocessTools = [];
+    }
+  }
+}
+
+// openPreprocessWizard shows the modal. caseDirHint pre-fills the
+// OutputRoot field when invoked from a settings menu of an existing
+// case; pass '' for new-case mode.
+function openPreprocessWizard(caseDirHint) {
+  if (!state.preprocessInfo || !state.preprocessInfo.available) {
+    toast('preprocessor not available: ' +
+      'no PowerShell interpreter was found at startup', true);
+    return;
+  }
+  document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+
+  // Local UI state. Re-rendered via rerender() on any change.
+  const ui = {
+    phase: 'idle', // 'idle' | 'running' | 'complete' | 'failed'
+    cfg: {
+      imagePath: '',
+      outputRoot: caseDirHint || '',
+      hostName: '',
+      operator: '',
+      collectionMethod: 'KAPE -> EZ Tools',
+      toolFilter: [], // empty = run all tools
+      runHayabusa: false,
+      runBitsParser: false,
+    },
+    selectAllTools: true, // checkbox state for "(default: all tools)"
+    error: '',
+    jobId: null,
+    log: '',
+    pollTimer: null,
+    completedCase: null, // when phase=complete, the produced case dir
+    closed: false,       // set when the modal is dismissed; polling exits early
+  };
+
+  // Submit hook: validate locally, POST /api/preprocess, transition to
+  // running and start polling the job's progress.
+  const submit = async () => {
+    ui.error = '';
+    if (!ui.cfg.imagePath) { ui.error = 'Image path is required.'; rerender(); return; }
+    if (!ui.cfg.outputRoot) { ui.error = 'Output root is required.'; rerender(); return; }
+
+    // Build the request payload from ui.cfg, omitting empty optionals
+    // so the JSON stays tidy.
+    const payload = {
+      imagePath: ui.cfg.imagePath,
+      outputRoot: ui.cfg.outputRoot,
+    };
+    if (ui.cfg.hostName) payload.hostName = ui.cfg.hostName;
+    if (ui.cfg.operator) payload.operator = ui.cfg.operator;
+    if (ui.cfg.collectionMethod) payload.collectionMethod = ui.cfg.collectionMethod;
+    // If selectAllTools is on, we don't send a toolFilter -- the PS1
+    // runs everything by default. If off, send whatever was checked
+    // (which may be []; the server will then run nothing, surfacing
+    // a clear error).
+    if (!ui.selectAllTools) payload.toolFilter = ui.cfg.toolFilter;
+    if (ui.cfg.runHayabusa) payload.runHayabusa = true;
+    if (ui.cfg.runBitsParser) payload.runBitsParser = true;
+
+    ui.phase = 'running';
+    ui.log = '';
+    rerender();
+    try {
+      const resp = await api.preprocessRun(payload);
+      ui.jobId = resp.jobId;
+      startPolling();
+    } catch (e) {
+      ui.phase = 'failed';
+      ui.error = e.message || String(e);
+      rerender();
+    }
+  };
+
+  // Poll the job status every second while running. Stops on transition
+  // to a terminal status.
+  const startPolling = () => {
+    const tick = async () => {
+      // If the modal was dismissed mid-poll, exit before doing any
+      // more work. Without this, an in-flight fetch + setInterval can
+      // briefly fire rerender() against an orphaned backdrop node.
+      if (ui.closed) {
+        stopPolling();
+        return;
+      }
+      if (!ui.jobId) return;
+      try {
+        const j = await fetchJSON('/api/jobs/' + encodeURIComponent(ui.jobId));
+        ui.log = j.progress || '';
+        if (j.status === 'complete') {
+          ui.phase = 'complete';
+          // The server returns the resolved case dir as resultId --
+          // that's the PS1's $OutputRoot/$CaseId, not just OutputRoot.
+          // Falling back to outputRoot if the field is missing keeps
+          // the wizard usable against older server builds.
+          ui.completedCase = j.resultId || ui.cfg.outputRoot;
+          stopPolling();
+        } else if (j.status === 'failed' || j.status === 'cancelled') {
+          ui.phase = 'failed';
+          ui.error = j.error || ('preprocessor ' + j.status);
+          stopPolling();
+        }
+      } catch (e) {
+        // Transient network issues during polling are non-fatal; keep
+        // trying. If the API is genuinely gone the next tick will
+        // also fail and the analyst can close the modal.
+      }
+      rerender();
+    };
+    ui.pollTimer = setInterval(tick, 1000);
+    tick(); // immediate first check, don't wait a full second
+  };
+  const stopPolling = () => {
+    if (ui.pollTimer) {
+      clearInterval(ui.pollTimer);
+      ui.pollTimer = null;
+    }
+  };
+
+  const cancel = async () => {
+    if (!ui.jobId) return;
+    try { await api.cancelJob(ui.jobId); } catch (_) {}
+    // Polling picks up the cancelled state.
+  };
+
+  const close = () => {
+    ui.closed = true;
+    stopPolling();
+    backdrop.remove();
+  };
+
+  const reopenAsCase = () => {
+    if (!ui.completedCase) return;
+    rememberCase(ui.completedCase);
+    close();
+    // The server has already opened the case (the work function calls
+    // s.cases.Open()); re-bootstrap to pick up the new hosts.
+    bootstrap();
+  };
+
+  let rerender;
+
+  const backdrop = $('div', {
+    class: 'modal-backdrop',
+    onclick: (e) => { if (e.target === backdrop) close(); },
+  });
+
+  const buildBody = () => {
+    if (ui.phase === 'idle' || ui.phase === 'failed') {
+      return $('div', { class: 'modal-body' }, buildForm());
+    }
+    if (ui.phase === 'running' || ui.phase === 'complete') {
+      return $('div', { class: 'modal-body' }, buildRunningView());
+    }
+    return $('div', { class: 'modal-body' }, 'Unknown phase: ' + ui.phase);
+  };
+
+  const buildForm = () => {
+    const tools = state.preprocessTools || [];
+    return $('div', { class: 'pp-form' },
+      // Two-column field grid.
+      $('div', { class: 'pp-field-grid' },
+        ppPathField('Image path', 'imagePath', ui.cfg, rerender,
+          'Mounted offline image root, e.g. E:\\'),
+        ppPathField('Output root', 'outputRoot', ui.cfg, rerender,
+          'Case directory to create, e.g. C:\\Cases\\acme-2026-05'),
+        ppTextField('Host name (optional)', 'hostName', ui.cfg, rerender,
+          'Inferred from SYSTEM hive if blank'),
+        ppTextField('Operator (optional)', 'operator', ui.cfg, rerender,
+          'e.g. j.kowalski@corp'),
+        ppTextField('Collection method', 'collectionMethod', ui.cfg, rerender,
+          'Free-form'),
+      ),
+      // Tools selection.
+      $('div', { class: 'pp-tools-block' },
+        $('div', { class: 'pp-tools-head' },
+          $('label', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+            $('input', {
+              type: 'checkbox',
+              checked: ui.selectAllTools,
+              onchange: (e) => { ui.selectAllTools = e.target.checked; rerender(); },
+            }),
+            $('span', null, 'Run all tools (default)'),
+          ),
+          $('span', { class: 'pp-tools-sub' },
+            ui.selectAllTools ? `${tools.length} tools will run` :
+              `${ui.cfg.toolFilter.length} selected`),
+        ),
+        !ui.selectAllTools && $('div', { class: 'pp-tools-grid' },
+          ...tools.map(t => $('label', { class: 'pp-tool-row' },
+            $('input', {
+              type: 'checkbox',
+              checked: ui.cfg.toolFilter.indexOf(t.id) >= 0,
+              onchange: (e) => {
+                if (e.target.checked) {
+                  ui.cfg.toolFilter = [...ui.cfg.toolFilter, t.id];
+                } else {
+                  ui.cfg.toolFilter = ui.cfg.toolFilter.filter(x => x !== t.id);
+                }
+                rerender();
+              },
+            }),
+            $('span', { class: 'pp-tool-label' }, t.label),
+            $('span', { class: 'pp-tool-tool' }, t.tool),
+          )),
+        ),
+      ),
+      // Optional addons.
+      $('div', { class: 'pp-addons' },
+        $('label', { class: 'pp-addon' },
+          $('input', {
+            type: 'checkbox',
+            checked: ui.cfg.runHayabusa,
+            onchange: (e) => { ui.cfg.runHayabusa = e.target.checked; rerender(); },
+          }),
+          $('span', null, 'Also run Hayabusa'),
+          $('span', { class: 'pp-addon-sub' }, '(sigma-based event log detection)'),
+        ),
+        $('label', { class: 'pp-addon' },
+          $('input', {
+            type: 'checkbox',
+            checked: ui.cfg.runBitsParser,
+            onchange: (e) => { ui.cfg.runBitsParser = e.target.checked; rerender(); },
+          }),
+          $('span', null, 'Also run BitsParser'),
+          $('span', { class: 'pp-addon-sub' }, '(BITS queue manager; requires BitsParser.exe)'),
+        ),
+      ),
+      ui.error && $('div', { class: 'pp-error' }, '⚠ ' + ui.error),
+    );
+  };
+
+  const buildRunningView = () => $('div', { class: 'pp-running' },
+    $('div', { class: 'pp-status-line' },
+      ui.phase === 'running' && $('span', { class: 'pp-status-spin' }, '⟳'),
+      ui.phase === 'complete' && $('span', { class: 'pp-status-ok' }, '✓'),
+      $('span', { class: 'pp-status-text' },
+        ui.phase === 'running'
+          ? 'Preprocessor running…'
+          : 'Preprocessor complete. Case written to ' + ui.completedCase),
+    ),
+    $('pre', { class: 'pp-log' }, ui.log || '(no output yet)'),
+  );
+
+  const buildFoot = () => {
+    if (ui.phase === 'idle' || ui.phase === 'failed') {
+      return $('div', { class: 'modal-foot' },
+        $('button', { class: 'btn', onclick: close }, 'Cancel'),
+        $('button', {
+          class: 'btn primary',
+          onclick: submit,
+          disabled: (!ui.cfg.imagePath || !ui.cfg.outputRoot) ? 'disabled' : false,
+        }, 'Run preprocessor'),
+      );
+    }
+    if (ui.phase === 'running') {
+      return $('div', { class: 'modal-foot' },
+        $('button', { class: 'btn', onclick: cancel }, 'Cancel run'),
+        $('button', { class: 'btn', disabled: 'disabled' }, 'Running…'),
+      );
+    }
+    if (ui.phase === 'complete') {
+      return $('div', { class: 'modal-foot' },
+        $('button', { class: 'btn', onclick: close }, 'Close'),
+        $('button', { class: 'btn primary', onclick: reopenAsCase }, 'Open case'),
+      );
+    }
+    return $('div', { class: 'modal-foot' });
+  };
+
+  const buildModal = () => $('div', {
+    class: 'modal pp-modal',
+    onclick: (e) => e.stopPropagation(),
+  },
+    $('div', { class: 'modal-head' },
+      $('div', { class: 'ico' }, '⚙'),
+      $('h3', null, 'Preprocess image'),
+      $('button', { class: 'close', onclick: close }, '✕'),
+    ),
+    buildBody(),
+    buildFoot(),
+  );
+
+  rerender = () => {
+    backdrop.innerHTML = '';
+    backdrop.appendChild(buildModal());
+  };
+  rerender();
+  document.body.appendChild(backdrop);
+}
+
+// ppPathField: a labeled text input with a Browse button next to it
+// that calls the existing browse-modal dialog. Reduces typing for
+// the two path-shaped fields (imagePath, outputRoot).
+function ppPathField(label, key, cfg, rerender, placeholder) {
+  return $('div', { class: 'pp-field' },
+    $('label', null, label),
+    $('div', { class: 'pp-path-row' },
+      $('input', {
+        type: 'text',
+        value: cfg[key],
+        placeholder: placeholder || '',
+        oninput: (e) => { cfg[key] = e.target.value; },
+        // Don't rerender on every keystroke -- the parent's submit
+        // disabled-state checks happen on change/blur instead.
+        onchange: (e) => { cfg[key] = e.target.value; rerender(); },
+      }),
+      $('button', {
+        class: 'btn',
+        onclick: () => openFolderBrowser(cfg[key], (picked) => {
+          cfg[key] = picked;
+          rerender();
+        }),
+      }, 'Browse'),
+    ),
+  );
+}
+
+function ppTextField(label, key, cfg, rerender, placeholder) {
+  return $('div', { class: 'pp-field' },
+    $('label', null, label),
+    $('input', {
+      type: 'text',
+      value: cfg[key],
+      placeholder: placeholder || '',
+      oninput: (e) => { cfg[key] = e.target.value; },
+      onchange: (e) => { cfg[key] = e.target.value; rerender(); },
+    }),
+  );
+}
 
 // ---------------------- mark helpers (client-side) ----------------------
 
@@ -1229,6 +2179,63 @@ function renderTitlebar(activeTab, totalMarks) {
     $('span', { class: 'title', style: { color: 'var(--fg-3)' } },
       `🚩 ${totalMarks}`),
     $('span', { class: 'title', style: { color: 'var(--fg-3)' } }, themeName),
+    // Settings dropdown: gear icon → menu of actions. The actions
+    // depend on whether a case is open; "Re-run preprocessor" is only
+    // useful when one is. Preprocess wizard entry only shows if the
+    // server reported a PowerShell interpreter at startup.
+    renderTitlebarSettings(),
+  );
+}
+
+// renderTitlebarSettings returns the gear-icon + dropdown menu. The
+// menu is shown/hidden via a toggle on a local state field. Click
+// outside the menu closes it.
+function renderTitlebarSettings() {
+  const open = state._settingsMenuOpen === true;
+  const items = [];
+  if (state.preprocessInfo && state.preprocessInfo.available) {
+    items.push({
+      label: state.caseInfo
+        ? 'Re-run preprocessor for a host'
+        : 'Preprocess new image',
+      onclick: () => {
+        state._settingsMenuOpen = false;
+        // When a case is open, pre-fill the OutputRoot with the
+        // current case dir so the analyst can target the same case.
+        openPreprocessWizard(state.caseDir || '');
+      },
+    });
+  }
+  if (items.length === 0) {
+    // Nothing to show -- still show the gear so the UI doesn't feel
+    // broken, just with a single "no actions" item.
+    items.push({
+      label: state.preprocessInfo
+        ? '(no preprocessor available)'
+        : '(loading…)',
+      onclick: null,
+    });
+  }
+
+  return $('div', { class: 'titlebar-settings' },
+    $('button', {
+      class: 'tb-settings-btn',
+      title: 'Settings',
+      onclick: (e) => {
+        e.stopPropagation();
+        state._settingsMenuOpen = !state._settingsMenuOpen;
+        render();
+      },
+    }, '⚙'),
+    open && $('div', {
+      class: 'tb-settings-menu',
+      onclick: (e) => e.stopPropagation(),
+    },
+      ...items.map(it => $('div', {
+        class: 'tb-settings-item' + (it.onclick ? '' : ' disabled'),
+        onclick: it.onclick || undefined,
+      }, it.label)),
+    ),
   );
 }
 
@@ -3280,10 +4287,26 @@ function renderCorrelationList(events, cache) {
 }
 
 
-// renderHostOverview shows the host's identity (KPI strip across the top)
-// followed by a grid of clickable artifact tiles. This is the landing
-// page when the analyst clicks a host in the sidebar without selecting
-// a specific artifact.
+// renderHostOverview is the landing view for a host -- a "briefing"
+// panel matching the static-handoff design at /handoff-overview/.
+// Class names follow that handoff verbatim so a future redesign can
+// drop in fresh CSS without touching the JS.
+//
+// Two design decisions specific to Douglas:
+//
+//   1. EDR/AV status pills are deliberately not rendered. The handoff
+//      includes them, but Douglas has no live-machine probe yet and
+//      surfacing "EDR: —" status pills was decided against earlier.
+//      Only the "Triaged" pill is shown.
+//
+//   2. The Local Users section is not rendered. Douglas doesn't
+//      derive a users list yet; that work is deferred (see TODO.md).
+//      When it lands, the section is a simple `Section title="Local
+//      users" wide` insertion with a table inside.
+//
+// The severity histogram reuses v0.14.0's ArtifactSummary.severityCounts
+// rather than re-scanning Hayabusa rows on the client. Same effect,
+// available at first paint.
 function renderHostOverview(hostId) {
   const host = state.hosts.find(h => h.id === hostId);
   if (!host) {
@@ -3291,28 +4314,222 @@ function renderHostOverview(hostId) {
   }
 
   const arts = host.artifacts || [];
-  const totalRows = arts.reduce((s, a) => s + (a.rowCount || 0), 0);
+  const identity = host.identity || null;
+  const hardware = host.hardware || null;
+  const network  = host.network  || null;
+  const triage   = host.triage   || null;
 
-  // Find the Hayabusa artifact for the "alerts" KPI. Hayabusa has its own
-  // artifact id "hayabusa"; alertCount on it is the count of severity-tagged
-  // rows. We sum alertCount across ALL artifacts for the "across all
-  // artifacts" caption.
+  const totalRows   = arts.reduce((s, a) => s + (a.rowCount || 0), 0);
   const totalAlerts = arts.reduce((s, a) => s + (a.alertCount || 0), 0);
 
-  // Role string for the second KPI. Prefer explicit fields, fall back to tag.
-  let roleText = host.role
-    || (host.tag === 'DC' ? 'Domain Controller' : 'Workstation');
-  const osText = host.os || '';
+  // Severity histogram totals. Sum across every artifact's per-row
+  // bucket counts populated server-side at host-discovery time. Keys
+  // are the canonical labels classifySeverity emits.
+  const sevTotals = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const a of arts) {
+    if (!a.severityCounts) continue;
+    for (const k of Object.keys(sevTotals)) {
+      sevTotals[k] += (a.severityCounts[k] || 0);
+    }
+  }
+  const sevMax = Math.max(1,
+    sevTotals.critical, sevTotals.high, sevTotals.medium,
+    sevTotals.low, sevTotals.info);
 
-  // Triage start: pretty-format ISO timestamp if present, else fall back.
-  const triageStart = host.triageStart
-    ? formatTriageStart(host.triageStart)
-    : '(not recorded)';
-  const triageSub = host.triageStart
-    ? 'from host.json' : 'set triageStart in host.json to populate';
+  // Header values. Built from the nested identity block when present,
+  // falling back to the flat fields so legacy host.json files still
+  // render something useful.
+  const hostName = (identity && identity.hostname) || host.name;
+  const fqdn = (identity && identity.fqdn) || host.fqdn || '';
+  const osDisplay = (identity && identity.os)
+    || (host.os || '');
+  const osWithVer = (identity && identity.osVersion)
+    ? `${osDisplay} · ${identity.osVersion}`
+    : osDisplay;
+  const buildText = (identity && identity.build) || '';
+  const archText = (identity && identity.arch) || '';
+  const tag = (host.tag || 'ws').toLowerCase();
+  const roleText = host.role
+    || (tag === 'dc' ? 'Domain Controller' : 'Workstation');
 
+  // Triaged status pill: the date + collection size summary.
+  const triageEnd = (triage && triage.completedAt) || host.triageStart || null;
+  const triageSize = triage && triage.sizeBytes ? formatBytes(triage.sizeBytes) : null;
+
+  // Header content -------------------------------------------------
+  const header = $('header', { class: 'host-ov-head' },
+    $('div', { class: 'ho-avatar' }, tag === 'dc' ? '🖥' : '💻'),
+    $('div', { class: 'ho-id' },
+      $('div', { class: 'ho-id-row' },
+        $('h1', { class: 'ho-name' }, hostName),
+        $('span', { class: 'host-tag ' + tag }, tag === 'dc' ? 'DC' : 'WS'),
+        $('span', { class: 'ho-role' }, roleText),
+      ),
+      $('div', { class: 'ho-fqdn' },
+        fqdn && $('span', { class: 'ho-fqdn-host' }, fqdn),
+        fqdn && $('span', { class: 'ho-sep' }, '·'),
+        $('span', null, osWithVer || '—'),
+        $('span', { class: 'ho-sep' }, '·'),
+        $('span', { class: 'mono' }, buildText || '—'),
+        $('span', { class: 'ho-sep' }, '·'),
+        $('span', null, archText || '—'),
+      ),
+    ),
+    $('div', { class: 'ho-status' },
+      triageEnd && hostStatusPill('ok', 'Triaged',
+        formatTriageStart(triageEnd).replace(' UTC', ''),
+        triageSize ? `${triageSize} collected` : null),
+    ),
+  );
+
+  // Identity card --------------------------------------------------
+  const identityCard = hoSection('Identity', '🛡', null, false, [
+    kvRow('Hostname', hostName, true),
+    kvRow('FQDN',     fqdn || '—', true),
+    kvRow('Domain',   (identity && identity.domain) || '—', false),
+    kvRow('Role',     roleText, false),
+    kvRow('OS',       osDisplay || '—', false),
+    kvRow('Build',    buildText || '—', true),
+    kvRow('Arch',     archText || '—', false),
+    kvRow('Time zone', (identity && identity.timeZone) || '—', false),
+  ]);
+
+  // Hardware card --------------------------------------------------
+  // Format the typed Go fields into the strings the design expects.
+  let cpuStr = '—';
+  if (hardware && hardware.cpuModel) {
+    cpuStr = hardware.cpuModel;
+    if (hardware.cpuCores && hardware.cpuThreads) {
+      cpuStr += ` · ${hardware.cpuCores}c/${hardware.cpuThreads}t`;
+    } else if (hardware.cpuCores) {
+      cpuStr += ` · ${hardware.cpuCores}c`;
+    }
+  }
+  const ramStr  = (hardware && hardware.ramBytes) ? formatBytes(hardware.ramBytes) : '—';
+  let diskStr = '—';
+  if (hardware && hardware.diskBytes) {
+    diskStr = formatBytes(hardware.diskBytes);
+    if (hardware.diskKind) diskStr = `${hardware.diskKind} ${diskStr}`;
+    if (hardware.diskUsedPercent) diskStr += ` · ${hardware.diskUsedPercent}% used`;
+  }
+  const lastBootStr = (hardware && hardware.lastBoot)
+    ? formatTriageStart(hardware.lastBoot) : '—';
+  const uptimeStr = (hardware && hardware.lastBoot)
+    ? (computeUptime(hardware.lastBoot) || '—') : '—';
+  const hardwareCard = hoSection('Hardware', '⚙', null, false, [
+    kvRow('CPU',       cpuStr, false),
+    kvRow('RAM',       ramStr, false),
+    kvRow('Disk',      diskStr, false),
+    kvRow('Last boot', lastBootStr, true),
+    kvRow('Uptime',    uptimeStr, false),
+  ]);
+
+  // Network card ---------------------------------------------------
+  const ipv4Str = (network && network.ipv4 && network.ipv4.length)
+    ? network.ipv4.join(', ') : '—';
+  const macStr  = (network && network.mac && network.mac.length)
+    ? network.mac.join(', ') : '—';
+  const gwStr   = (network && network.gateway) || '—';
+  const dnsStr  = (network && network.dns && network.dns.length)
+    ? network.dns.join(', ') : '—';
+  const networkCard = hoSection('Network', '🌐', null, false, [
+    kvRow('IPv4',    ipv4Str, true),
+    kvRow('MAC',     macStr,  true),
+    kvRow('Gateway', gwStr,   true),
+    kvRow('DNS',     dnsStr,  true),
+  ]);
+
+  // Triage Collection card ----------------------------------------
+  const trMethod    = (triage && triage.method)    || '—';
+  const trOperator  = (triage && triage.operator)  || '—';
+  const trTargets   = (triage && triage.targets && triage.targets.length)
+    ? triage.targets.join(', ') : '—';
+  const trStarted   = (triage && triage.startedAt)
+    ? formatTriageStart(triage.startedAt)
+    : (host.triageStart ? formatTriageStart(host.triageStart) : '—');
+  const trCompleted = (triage && triage.completedAt)
+    ? formatTriageStart(triage.completedAt) : '—';
+  const trSize      = (triage && triage.sizeBytes) ? formatBytes(triage.sizeBytes) : '—';
+  const collectionCard = hoSection('Triage collection', '📋', null, false, [
+    kvRow('Method',    trMethod,    false),
+    kvRow('Operator',  trOperator,  true),
+    kvRow('Targets',   trTargets,   true),
+    kvRow('Started',   trStarted,   true),
+    kvRow('Completed', trCompleted, true),
+    kvRow('Size',      trSize,      false),
+  ]);
+
+  // Detections card ------------------------------------------------
+  const detectionsRight = $('button', {
+    class: 'ho-link',
+    onclick: () => openTab({
+      kind: 'host-timeline', hostId: host.id, artifactId: '',
+      label: `${host.name} · Timeline`,
+    }),
+  }, 'Open timeline →');
+
+  const sevGrid = $('div', { class: 'ho-sev-grid' },
+    sevBar('Critical', sevTotals.critical, sevMax, 'var(--crit)'),
+    sevBar('High',     sevTotals.high,     sevMax, 'var(--warn)'),
+    sevBar('Medium',   sevTotals.medium,   sevMax, 'var(--info)'),
+    sevBar('Low',      sevTotals.low,      sevMax, 'var(--ok)'),
+    sevBar('Info',     sevTotals.info,     sevMax, 'var(--fg-faint)'),
+  );
+  const detTotals = $('div', { class: 'ho-det-tot' },
+    $('span', null, String(totalAlerts)),
+    $('span', { class: 'ho-det-sub' },
+      `total alerts across ${arts.length} artifact${arts.length === 1 ? '' : 's'}`),
+  );
+  const detectionsCard = hoSection('Detections', '🔔', detectionsRight, false, [
+    sevGrid, detTotals,
+  ]);
+
+  // Artifacts section ---------------------------------------------
+  const artifactsSection = $('section', { class: 'host-ov-artifacts' },
+    $('div', { class: 'ho-section-head' },
+      $('span', { class: 'ho-section-title' }, 'Available artifacts'),
+      arts.length > 0 && $('span', { class: 'ho-section-sub' },
+        `${arts.length} parsed · ${totalRows.toLocaleString()} rows total`),
+    ),
+    arts.length === 0
+      ? $('div', { class: 'empty' },
+          $('div', { class: 'e-inner' },
+            $('div', { class: 'e-icon' }, '∅'),
+            $('h3', null, 'No artifacts loaded for this host'),
+            $('p', null,
+              'The host folder contains no recognized CSVs, or every CSV was empty. ' +
+              'See Empty_Artifacts.txt at the case root.'),
+          ),
+        )
+      : $('div', { class: 'ho-artifact-grid' },
+          ...arts.map(a => $('button', {
+            class: 'ho-art-card',
+            onclick: () => openTab({
+              kind: 'artifact', hostId: host.id, artifactId: a.id,
+              label: `${host.name} · ${a.name}`,
+            }),
+          },
+            $('span', { class: 'ho-art-icon' }, a.icon || '·'),
+            $('span', { class: 'ho-art-body' },
+              $('span', { class: 'ho-art-name' }, a.name),
+              $('span', { class: 'ho-art-sub' },
+                `${a.tool || ''} · `,
+                $('span', { class: 'mono' }, shortenSource(a.sourceFile)),
+              ),
+            ),
+            $('span', { class: 'ho-art-meta' },
+              $('span', { class: 'ho-art-count' }, (a.rowCount || 0).toLocaleString()),
+              a.alertCount > 0
+                ? $('span', { class: 'ho-art-alerts' },
+                    `⚠ ${a.alertCount} alert${a.alertCount === 1 ? '' : 's'}`)
+                : $('span', { class: 'ho-art-rows' }, 'rows'),
+            ),
+          )),
+        ),
+  );
+
+  // Compose -------------------------------------------------------
   return $('div', { class: 'main host-page', style: { display: 'contents' } },
-    // breadcrumb (host name, current = Overview)
     $('div', { class: 'toolbar' },
       $('div', { class: 'crumbs' },
         $('span', { class: 'cur' }, host.name),
@@ -3320,79 +4537,100 @@ function renderHostOverview(hostId) {
         $('span', { class: 'cur' }, 'Overview'),
       ),
     ),
-
-    // Scrollable body wrapping the KPI strip + artifact grid.
-    $('div', { class: 'host-page-body' },
-      // KPI strip
-      $('div', { class: 'host-overview' },
-        $('div', { class: 'host-kpi' },
-          $('div', { class: 'kpi-ico' }, '🖥'),
-          $('div', { class: 'kpi-label' }, 'Hostname'),
-          $('div', { class: 'kpi-value' }, host.name),
-          host.fqdn && $('div', { class: 'kpi-sub' }, host.fqdn),
-        ),
-        $('div', { class: 'host-kpi' },
-          $('div', { class: 'kpi-ico' }, '🛡'),
-          $('div', { class: 'kpi-label' }, 'Role · OS'),
-          $('div', { class: 'kpi-value' }, roleText),
-          osText && $('div', { class: 'kpi-sub' }, osText),
-        ),
-        $('div', { class: 'host-kpi' },
-          $('div', { class: 'kpi-ico' }, '📄'),
-          $('div', { class: 'kpi-label' }, 'Artifacts loaded'),
-          $('div', { class: 'kpi-value' }, String(arts.length)),
-          $('div', { class: 'kpi-sub' }, `${totalRows.toLocaleString()} rows total`),
-        ),
-        $('div', { class: 'host-kpi' + (totalAlerts > 0 ? ' alert' : '') },
-          $('div', { class: 'kpi-ico' }, '🔔'),
-          $('div', { class: 'kpi-label' }, 'Hayabusa alerts'),
-          $('div', { class: 'kpi-value' }, String(totalAlerts)),
-          $('div', { class: 'kpi-sub' }, 'across all artifacts'),
-        ),
-        $('div', { class: 'host-kpi' },
-          $('div', { class: 'kpi-ico' }, '⏱'),
-          $('div', { class: 'kpi-label' }, 'Triage started'),
-          $('div', { class: 'kpi-value' }, triageStart),
-          $('div', { class: 'kpi-sub' }, triageSub),
-        ),
+    $('div', { class: 'host-ov-scroll' },
+      header,
+      $('div', { class: 'host-ov-grid' },
+        identityCard,
+        hardwareCard,
+        networkCard,
+        collectionCard,
+        detectionsCard,
       ),
-
-      // artifact tile grid
-      $('h3', null, 'Available artifacts'),
-      arts.length === 0
-        ? $('div', { class: 'empty' },
-            $('div', { class: 'e-inner' },
-              $('div', { class: 'e-icon' }, '∅'),
-              $('h3', null, 'No artifacts loaded for this host'),
-              $('p', null,
-                'The host folder contains no recognized CSVs, or every CSV was empty. ' +
-                'See Empty_Artifacts.txt at the case root.'),
-            ),
-          )
-        : $('div', { class: 'art-card-grid' },
-            ...arts.map(a => $('div', {
-              class: 'art-card',
-              onclick: () => openTab({
-                kind: 'artifact', hostId: host.id, artifactId: a.id,
-                label: `${host.name} · ${a.name}`,
-              }),
-            },
-              $('div', { class: 'ac-head' },
-                $('div', { class: 'ac-icon' }, a.icon || '·'),
-                $('div', null,
-                  $('div', { class: 'ac-name' }, a.name),
-                  $('div', { class: 'ac-sub' }, `${a.tool || ''} · ${shortenSource(a.sourceFile)}`),
-                ),
-              ),
-              $('div', { class: 'ac-foot' },
-                $('span', null, `${(a.rowCount || 0).toLocaleString()} rows`),
-                a.alertCount > 0 && $('span', { class: 'ac-alert' },
-                  '⚠ ', `${a.alertCount} alerts`),
-              ),
-            )),
-          ),
+      artifactsSection,
     ),
   );
+}
+
+// hoSection builds one card with the standard head/body structure
+// matching the handoff's <Section> component. `right` is an optional
+// node (e.g. the "Open timeline →" link) shown on the right side of
+// the head; pass null to omit. `wide` makes the card span the full
+// grid (used by the Users section when that lands).
+function hoSection(title, icon, right, wide, bodyChildren) {
+  const head = $('header', { class: 'ho-section-h' },
+    $('span', { class: 'ho-section-h-l' },
+      $('span', { class: 'ho-section-ico' }, icon),
+      $('span', { class: 'ho-section-t' }, title),
+    ),
+    right && $('span', { class: 'ho-section-r' }, right),
+  );
+  return $('section', { class: 'ho-section' + (wide ? ' wide' : '') },
+    head,
+    $('div', { class: 'ho-section-body' }, ...bodyChildren),
+  );
+}
+
+// kvRow is one "Key — Value" pair inside a section body. Matches the
+// handoff's <Kv> component. `mono` toggles the monospace styling on
+// the value (preferred for paths, IPs, MACs, timestamps).
+function kvRow(k, v, mono) {
+  return $('div', { class: 'ho-kv' },
+    $('div', { class: 'ho-kv-k' }, k),
+    $('div', { class: 'ho-kv-v' + (mono ? ' mono' : '') }, v),
+  );
+}
+
+// hostStatusPill matches the handoff's <StatusPill>. `kind` is one of
+// 'ok' | 'warn' | 'bad'. The pill colours follow the var(--ok|warn|crit)
+// theme tokens via the .ho-pill.{ok,warn,bad} CSS rules.
+function hostStatusPill(kind, label, value, sub) {
+  return $('div', { class: 'ho-pill ' + kind },
+    $('span', { class: 'ho-pill-dot' }),
+    $('span', { class: 'ho-pill-body' },
+      $('span', { class: 'ho-pill-label' }, label),
+      $('span', { class: 'ho-pill-value' }, value),
+      sub && $('span', { class: 'ho-pill-sub' }, sub),
+    ),
+  );
+}
+
+// sevBar is one row of the detections histogram. The fill width is
+// scaled to the largest bucket on the host so the visual distribution
+// reads correctly even when totals are small. A nonzero count gets at
+// least 2% width so the bar is always visible when present.
+function sevBar(label, count, max, color) {
+  const widthPct = count > 0 ? Math.max(2, Math.round((count / max) * 100)) : 0;
+  return $('div', { class: 'ho-sev' },
+    $('span', { class: 'ho-sev-l' }, label),
+    $('span', { class: 'ho-sev-track' },
+      $('span', {
+        class: 'ho-sev-fill',
+        style: { width: widthPct + '%', background: color },
+      }),
+    ),
+    $('span', { class: 'ho-sev-n mono' }, String(count)),
+  );
+}
+
+// computeUptime returns a "21h 18m" style string derived from a lastBoot
+// ISO timestamp, or '' when the timestamp is in the distant past (months
+// or years -- almost certainly an offline-image artifact where "last
+// boot" was when the image was captured, not "right now"). Threshold
+// of 30 days keeps us from showing nonsense uptimes.
+function computeUptime(isoLastBoot) {
+  try {
+    const d = new Date(isoLastBoot);
+    if (isNaN(d.getTime())) return '';
+    const ms = Date.now() - d.getTime();
+    if (ms < 0) return '';
+    if (ms > 30 * 24 * 3600 * 1000) return '';
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    if (h === 0) return `${m}m`;
+    return `${h}h ${m}m`;
+  } catch {
+    return '';
+  }
 }
 
 // formatTriageStart turns an ISO 8601 timestamp into the compact display
@@ -3673,5 +4911,23 @@ function exportTimeline_DEPRECATED() {
 }
 
 // ---------------------- start ----------------------
+
+setupDropZone();
+
+// Global click listener: close the titlebar settings menu when the
+// user clicks anywhere outside it. Inside-clicks stopPropagation in
+// renderTitlebarSettings; outside clicks fall through to here.
+document.addEventListener('click', () => {
+  if (state._settingsMenuOpen) {
+    state._settingsMenuOpen = false;
+    render();
+  }
+});
+
+// Discover the preprocessor capability before first render so the
+// settings menu has the right items from the first paint. Failure
+// to discover just leaves preprocessInfo as null and the menu shows
+// "(loading…)" briefly, then renders empty.
+initPreprocess().then(() => render());
 
 bootstrap();
