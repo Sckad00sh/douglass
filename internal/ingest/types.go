@@ -339,13 +339,20 @@ var ArtifactTypes = []ArtifactType{
 		},
 	},
 	{
+		// JLECmd writes Automatic Destinations (system-managed jump
+		// lists, .automaticDestinations-ms files) to this CSV. The
+		// previous single "jumplist" entry pointed at "JLECmd_Output"
+		// which JLECmd never actually produces -- a real-world bug
+		// that meant analysts running JLECmd got no matching artifact
+		// type. Split into Automatic + Custom destinations, matching
+		// the same pattern Amcache uses for its multi-CSV output.
 		ArtifactType: model.ArtifactType{
-			ID: "jumplist", Name: "Jump Lists", Icon: "↗", Tool: "JLECmd",
-			Category: "Execution", File: "JLECmd_Output.csv",
+			ID: "jumplist-auto", Name: "Jump Lists (Auto)", Icon: "↗", Tool: "JLECmd",
+			Category: "Execution", File: "JLECmd_AutomaticDestinations.csv",
 			PrimaryTime:   "LastModified",
 			ContextFields: []string{"TargetPath", "AppId", "EntryNumber"},
 		},
-		FilenamePattern: regexp.MustCompile(`(?i)JLECmd_Output.*\.csv$`),
+		FilenamePattern: regexp.MustCompile(`(?i)JLECmd_AutomaticDestinations.*\.csv$`),
 		Columns: []model.Column{
 			{Key: "TargetCreated", Label: "Target Created", Width: 170, Mono: true},
 			{Key: "LastModified", Label: "Last Modified", Width: 170, Mono: true},
@@ -353,6 +360,96 @@ var ArtifactTypes = []ArtifactType{
 			{Key: "AppId", Label: "AppID", Width: 180, Mono: true},
 			{Key: "TargetPath", Label: "Target Path", Width: 320, Mono: true},
 			{Key: "EntryNumber", Label: "Entry #", Width: 70, Numeric: true},
+			{Key: "Hostname", Label: "Hostname", Width: 140, Mono: true},
+			{Key: "FileSize", Label: "Size", Width: 90, Numeric: true},
+		},
+	},
+	{
+		// JLECmd Custom Destinations: app-managed jump lists, from
+		// .customDestinations-ms files. Schema differs slightly from
+		// automatic (no Hostname, has Name).
+		ArtifactType: model.ArtifactType{
+			ID: "jumplist-custom", Name: "Jump Lists (Custom)", Icon: "↗", Tool: "JLECmd",
+			Category: "Execution", File: "JLECmd_CustomDestinations.csv",
+			PrimaryTime:   "LastModified",
+			ContextFields: []string{"TargetPath", "AppId", "EntryNumber"},
+		},
+		FilenamePattern: regexp.MustCompile(`(?i)JLECmd_CustomDestinations.*\.csv$`),
+		Columns: []model.Column{
+			{Key: "TargetCreated", Label: "Target Created", Width: 170, Mono: true},
+			{Key: "LastModified", Label: "Last Modified", Width: 170, Mono: true},
+			{Key: "SourceFile", Label: "Source File", Width: 280, Mono: true},
+			{Key: "AppId", Label: "AppID", Width: 180, Mono: true},
+			{Key: "Name", Label: "Name", Width: 200},
+			{Key: "TargetPath", Label: "Target Path", Width: 320, Mono: true},
+			{Key: "EntryNumber", Label: "Entry #", Width: 70, Numeric: true},
+		},
+	},
+	{
+		// Shellbags from SBECmd. Surfaces folder-access traces from
+		// both NTUSER.DAT (Explorer-accessed folders) and UsrClass.dat
+		// (mounted/virtual folders). The two hives produce slightly
+		// different row sets; we use a parseShellbags wrapper that
+		// runs parseCSV then adds a derived HiveKind column so analysts
+		// can filter by source without flipping between tabs.
+		//
+		// SBECmd's --csv output writes "<datetime>_SBECmd_*_Output.csv"
+		// in the chosen dir; we match both per-hive outputs and any
+		// combined report.
+		ArtifactType: model.ArtifactType{
+			ID: "shellbags", Name: "Shellbags", Icon: "📁", Tool: "SBECmd",
+			Category: "Filesystem", File: "20260515093000_SBECmd_NTUSER_Output.csv",
+			PrimaryTime:   "LastInteracted",
+			ContextFields: []string{"AbsolutePath", "HiveKind", "Slot"},
+		},
+		FilenamePattern: regexp.MustCompile(`(?i)SBECmd.*Output.*\.csv$`),
+		Parser:          parseShellbags,
+		Columns: []model.Column{
+			{Key: "LastInteracted", Label: "Last Interacted", Width: 170, Mono: true},
+			{Key: "AbsolutePath", Label: "Absolute Path", Width: 380, Mono: true},
+			{Key: "HiveKind", Label: "Source", Width: 90},
+			{Key: "HasExplored", Label: "Explored", Width: 80},
+			{Key: "CreatedOn", Label: "Created", Width: 170, Mono: true},
+			{Key: "ModifiedOn", Label: "Modified", Width: 170, Mono: true},
+			{Key: "AccessedOn", Label: "Accessed", Width: 170, Mono: true},
+			{Key: "Slot", Label: "Slot", Width: 60, Numeric: true},
+			{Key: "MFTEntry", Label: "MFT Entry", Width: 90, Numeric: true},
+			{Key: "ShellType", Label: "Shell Type", Width: 120},
+			{Key: "SourceFile", Label: "Source File", Width: 280, Mono: true},
+		},
+	},
+	{
+		// BITS (Background Intelligent Transfer Service) jobs. Output
+		// comes from BitsParser (community tool, NOT part of EZ Tools)
+		// pointed at qmgr*.dat under C:\ProgramData\Microsoft\Network\
+		// Downloader\. High DFIR value: attackers use BITS for
+		// resilient downloads that survive reboots and look like
+		// legitimate OS traffic.
+		//
+		// Several community tools produce slightly different CSV
+		// schemas; the most common variant exposes the columns we
+		// claim here. Tools that emit subset columns will leave the
+		// missing ones empty -- the table view handles that fine.
+		ArtifactType: model.ArtifactType{
+			ID: "bits", Name: "BITS Jobs", Icon: "📥", Tool: "BitsParser",
+			Category: "System", File: "BitsParser_Output.csv",
+			PrimaryTime:   "CreationTime",
+			ContextFields: []string{"URL", "LocalFile", "Owner", "State"},
+		},
+		FilenamePattern: regexp.MustCompile(`(?i)BitsParser.*\.csv$`),
+		Columns: []model.Column{
+			{Key: "CreationTime", Label: "Created", Width: 170, Mono: true},
+			{Key: "CompletionTime", Label: "Completed", Width: 170, Mono: true},
+			{Key: "State", Label: "State", Width: 110},
+			{Key: "Name", Label: "Job Name", Width: 200},
+			{Key: "URL", Label: "URL", Width: 380, Mono: true},
+			{Key: "LocalFile", Label: "Local File", Width: 320, Mono: true},
+			{Key: "Owner", Label: "Owner", Width: 160, Mono: true},
+			{Key: "JobId", Label: "Job ID", Width: 280, Mono: true},
+			{Key: "Type", Label: "Type", Width: 90},
+			{Key: "Priority", Label: "Priority", Width: 80},
+			{Key: "BytesTransferred", Label: "Bytes Tx", Width: 110, Numeric: true},
+			{Key: "BytesTotal", Label: "Bytes Total", Width: 110, Numeric: true},
 		},
 	},
 	{

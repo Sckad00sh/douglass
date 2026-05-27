@@ -239,16 +239,28 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 		}
 		path := filepath.Join(artDir, f.Name())
 		var rowCount, alertCount int
-		if t.Parser != nil {
-			// Non-CSV artifact (e.g. MPLog). A real row count requires
-			// running the parser, which is expensive at discovery time
-			// for large files. Estimate from file size instead -- exact
-			// count is filled in at LoadArtifact. Severity counting
-			// likewise defers to load time.
+		var sevCounts map[string]int
+		// Stat strategy depends on the on-disk format, not on whether
+		// the type has a custom Parser. Some artifacts (shellbags) use
+		// a custom Parser to enrich rows but the underlying file is
+		// still a CSV that quickStat can count. Other artifacts (MPLog)
+		// have a non-CSV format that needs the file-size estimate.
+		// The file extension is the cheapest correct discriminator.
+		isCSV := strings.HasSuffix(strings.ToLower(f.Name()), ".csv")
+		if !isCSV && t.Parser != nil {
+			// Non-CSV custom-parsed artifact (e.g. MPLog). A real row
+			// count requires running the parser, which is expensive at
+			// discovery time for large files. Estimate from file size
+			// instead -- exact count is filled in at LoadArtifact.
+			// Severity counting likewise defers to load time -- the
+			// host overview histogram shows zero contribution from
+			// these artifacts until they're loaded, which is fine for
+			// phase 2 since the Hayabusa CSV (the main detection
+			// source) is always counted here.
 			if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
 				// UTF-16 LE: ~2 bytes per char, ~250 chars per line on
-				// MPLog. So size/500 is a rough line estimate. Floor at 1
-				// so the artifact doesn't get classified "empty".
+				// MPLog. So size/500 is a rough line estimate. Floor
+				// at 1 so the artifact doesn't get classified "empty".
 				est := int(fi.Size() / 500)
 				if est < 1 {
 					est = 1
@@ -256,7 +268,8 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 				rowCount = est
 			}
 		} else {
-			rowCount, alertCount = quickStat(path)
+			// CSV (with or without a custom Parser for post-processing).
+			rowCount, alertCount, sevCounts = quickStat(path)
 		}
 		// Empty artifacts get reported but NOT added to the sidebar.
 		// quickStat returns 0 either because the source CSV is header-only
@@ -273,14 +286,15 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 			continue
 		}
 		host.ArtifactSummaries = append(host.ArtifactSummaries, model.ArtifactSummary{
-			ID:         t.ID,
-			Name:       t.Name,
-			Icon:       t.Icon,
-			Category:   t.Category,
-			Tool:       t.Tool,
-			SourceFile: path,
-			RowCount:   rowCount,
-			AlertCount: alertCount,
+			ID:             t.ID,
+			Name:           t.Name,
+			Icon:           t.Icon,
+			Category:       t.Category,
+			Tool:           t.Tool,
+			SourceFile:     path,
+			RowCount:       rowCount,
+			AlertCount:     alertCount,
+			SeverityCounts: sevCounts,
 		})
 	}
 	if len(host.ArtifactSummaries) == 0 {
@@ -292,10 +306,23 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 // quickStat counts rows (and crit/high alerts for severity-aware artifacts)
 // without keeping the full result set in memory. Streams the CSV once.
 // Alerts are inferred from a "Level" column if present (case-insensitive).
-func quickStat(path string) (rows, alerts int) {
+// quickStat scans a CSV cheaply to produce row count, alert count,
+// and per-severity row counts. The severity buckets are the canonical
+// 5-level labels used by the host-overview detections histogram:
+// "critical", "high", "medium", "low", "info".
+//
+// Severity is read from a "Level" or "Severity" column (case-insensitive).
+// Values are normalised to the canonical bucket via classifySeverity.
+// Artifacts without either column emit no severity counts (nil map).
+//
+// Returns rows, alerts, sevCounts. alerts is preserved for backward
+// compatibility (existing UI badge) and counts rows whose severity
+// matched critical/high/error/warning. sevCounts is the breakdown
+// for the new histogram.
+func quickStat(path string) (rows, alerts int, sevCounts map[string]int) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, 0
+		return 0, 0, nil
 	}
 	defer f.Close()
 	r := csv.NewReader(f)
@@ -303,12 +330,16 @@ func quickStat(path string) (rows, alerts int) {
 	r.LazyQuotes = true
 	header, err := r.Read()
 	if err != nil {
-		return 0, 0
+		return 0, 0, nil
 	}
-	levelIdx := -1
+	// Find the severity-carrying column. Hayabusa uses "Level"; MPLog
+	// (when its CSV variants come through this path) uses "Severity".
+	// First match wins; if both exist we'd prefer Level since it's
+	// Hayabusa's canonical detection column.
+	sevIdx := -1
 	for i, h := range header {
-		if strings.EqualFold(h, "Level") {
-			levelIdx = i
+		if strings.EqualFold(h, "Level") || strings.EqualFold(h, "Severity") {
+			sevIdx = i
 			break
 		}
 	}
@@ -321,14 +352,52 @@ func quickStat(path string) (rows, alerts int) {
 			continue
 		}
 		rows++
-		if levelIdx >= 0 && levelIdx < len(rec) {
-			switch strings.ToLower(strings.TrimSpace(rec[levelIdx])) {
+		if sevIdx >= 0 && sevIdx < len(rec) {
+			raw := strings.ToLower(strings.TrimSpace(rec[sevIdx]))
+			// Legacy alert count: critical/high/error/warning bucket.
+			switch raw {
 			case "crit", "critical", "high", "error", "warning":
 				alerts++
 			}
+			// New per-severity bucket. classifySeverity returns "" for
+			// unrecognised values so we don't bucket noise.
+			if bucket := classifySeverity(raw); bucket != "" {
+				if sevCounts == nil {
+					sevCounts = make(map[string]int, 5)
+				}
+				sevCounts[bucket]++
+			}
 		}
 	}
-	return rows, alerts
+	return rows, alerts, sevCounts
+}
+
+// classifySeverity maps a raw lowercased severity string from various
+// artifact sources to one of the 5 canonical buckets used by the host
+// overview detections histogram. Returns "" for values we don't
+// recognise (analyst can still see the row in the artifact view but
+// it won't contribute to the histogram).
+//
+// Bucket sources:
+//   - Hayabusa: critical / high / medium / low / informational
+//   - MPLog:    crit / high / warn / low / info
+//   - Generic:  error / warning (legacy alert-count terms; mapped
+//     conservatively so existing data doesn't get re-bucketed
+//     surprisingly)
+func classifySeverity(s string) string {
+	switch s {
+	case "critical", "crit":
+		return "critical"
+	case "high", "error":
+		return "high"
+	case "medium", "med", "warn", "warning":
+		return "medium"
+	case "low":
+		return "low"
+	case "informational", "info":
+		return "info"
+	}
+	return ""
 }
 
 // Case returns a (deep enough) copy of the current case for JSON serialisation.
@@ -336,6 +405,18 @@ func (s *Store) Case() *model.Case {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cs
+}
+
+// CaseDir returns the absolute filesystem path of the currently-open
+// case, or empty string if no case is open. Used by /api/upload to
+// trigger a rescan after new artifacts land on disk.
+func (s *Store) CaseDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cs == nil {
+		return ""
+	}
+	return s.cs.Dir
 }
 
 // LoadArtifact returns the fully-parsed artifact, loading from disk if needed.

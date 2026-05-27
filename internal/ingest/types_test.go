@@ -39,13 +39,28 @@ func TestRecognize(t *testing.T) {
 		{"20251108112233_RECmd_Batch_Kroll_Batch_Output.csv", "registry"},
 		{"20251108112233_RECmd_Batch_RECmd_Batch_MC_Output.csv", "registry"},
 		{"LECmd_Output.csv", "lnk"},
-		{"JLECmd_Output.csv", "jumplist"},
+		// Jump Lists is split into Auto vs Custom in v0.11.0+. The old
+		// "JLECmd_Output.csv" filename was a Douglas-side fiction --
+		// JLECmd never produced that name. Recognise the actual native
+		// outputs instead.
+		{"JLECmd_AutomaticDestinations.csv", "jumplist-auto"},
+		{"JLECmd_CustomDestinations.csv", "jumplist-custom"},
+		// Shellbags: SBECmd produces dated outputs split by hive.
+		{"20260515093000_SBECmd_NTUSER_Output.csv", "shellbags"},
+		{"20260515093000_SBECmd_UsrClass_Output.csv", "shellbags"},
+		// BITS jobs from BitsParser (community tool, not EZ Tools).
+		{"BitsParser_Output.csv", "bits"},
+		{"20260515093000_BitsParser_Output.csv", "bits"},
 
 		// Negative cases — should NOT match anything
 		{"notes.txt", ""},
 		{"random.csv", ""},
 		{"system.log", ""},
 		{"", ""},
+		// Old JLECmd filename that no longer matches anything (was a
+		// stale Douglas-side convention; left here so a regression
+		// re-introducing the old pattern would trip).
+		{"JLECmd_Output.csv", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
