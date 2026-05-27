@@ -3,6 +3,8 @@
 A host-centric DFIR review tool for Zimmerman / EZ Tools and Hayabusa CSV output.
 Single Go binary, embedded UI, no runtime dependencies.
 
+**[Project site & interactive demo →](https://yourname.github.io/douglas/)**
+
 ## What it does
 
 Where Timeline Explorer is file-centric ("open one CSV, look at it"),

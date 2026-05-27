@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Douglas — host-centric DFIR review tool</title>
+  <meta name="description" content="Host-centric DFIR review tool for Zimmerman/EZ Tools and Hayabusa CSV output. Pure Go, single binary, local web UI, zero external dependencies.">
+
+  <!-- Open Graph for link previews -->
+  <meta property="og:title" content="Douglas — host-centric DFIR review tool">
+  <meta property="og:description" content="Host-centric DFIR review tool for Zimmerman/EZ Tools and Hayabusa CSV output. Pure Go, single binary, local web UI.">
+  <meta property="og:type" content="website">
+
+  <style>
+    /* ------------------------------------------------------------------
+       Theme tokens — Velociraptor dark theme, kept in sync with the
+       real app via cmd/artifact-review/static/themes.css.
+       ------------------------------------------------------------------ */
+    :root {
+      --bg:           #0e1620;
+      --bg-1:         #14202e;
+      --bg-2:         #182838;
+      --bg-3:         #1d3144;
+      --bg-elev:      #25435e;
+      --border:       #294a68;
+      --border-soft:  #1f3850;
+      --fg:           #e6eef7;
+      --fg-2:         #b1c3d6;
+      --fg-3:         #7a92ab;
+      --fg-faint:     #4d6580;
+      --accent:       #36c6e8;
+      --accent-2:     #4fd9ff;
+      --accent-fg:    #06141e;
+      --accent-soft:  rgba(54,198,232,0.15);
+      --ok:           #46c97a;
+      --warn:         #e6c34d;
+      --crit:         #ff5b6a;
+      --info:         #4fa6ff;
+      --chip-bg:      #1d3346;
+      color-scheme: dark;
+    }
+
+    /* ------------------------------------------------------------------
+       Base
+       ------------------------------------------------------------------ */
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.55;
+    }
+    .mono {
+      font-family: 'JetBrains Mono', 'Ubuntu Mono', 'SF Mono', Menlo, Consolas, monospace;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .container {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* ------------------------------------------------------------------
+       Top nav
+       ------------------------------------------------------------------ */
+    .topnav {
+      border-bottom: 1px solid var(--border-soft);
+      background: var(--bg-1);
+    }
+    .topnav-inner {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 14px 24px;
+      max-width: 1080px;
+      margin: 0 auto;
+    }
+    .brand {
+      font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--fg);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+    }
+    .brand:hover { text-decoration: none; }
+    .brand-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .topnav .links {
+      display: flex;
+      gap: 18px;
+      margin-left: auto;
+      font-size: 13.5px;
+    }
+    .topnav .links a {
+      color: var(--fg-2);
+      font-weight: 500;
+    }
+    .topnav .links a:hover { color: var(--accent); text-decoration: none; }
+
+    /* ------------------------------------------------------------------
+       Hero
+       ------------------------------------------------------------------ */
+    .hero {
+      padding: 56px 0 36px;
+      background:
+        radial-gradient(800px 280px at 50% -50px, var(--accent-soft), transparent),
+        var(--bg);
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .hero-inner {
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 44px;
+      font-weight: 800;
+      letter-spacing: -0.8px;
+      margin: 0 0 12px;
+      color: var(--fg);
+    }
+    .hero h1 .accent { color: var(--accent); }
+    .hero .tagline {
+      font-size: 18px;
+      color: var(--fg-2);
+      max-width: 640px;
+      margin: 0 auto 28px;
+    }
+    .hero .cta {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: 3px;
+      font-size: 14px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: var(--bg-2);
+      color: var(--fg);
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      text-decoration: none;
+    }
+    .btn:hover {
+      border-color: var(--accent);
+      text-decoration: none;
+    }
+    .btn.primary {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border-color: var(--accent);
+    }
+    .btn.primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
+    .btn.ghost { background: transparent; }
+    .btn .arrow { transition: transform 0.15s; }
+    .btn:hover .arrow { transform: translateX(2px); }
+
+    /* ------------------------------------------------------------------
+       Visual preview — a CSS-only recreation of the host overview
+       header, so the page shows what Douglas looks like without needing
+       a screenshot. Class names mirror the real app's so the styling
+       stays in sync.
+       ------------------------------------------------------------------ */
+    .preview {
+      max-width: 920px;
+      margin: 36px auto 0;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    }
+    .preview-titlebar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      background: #14202e;
+      border-bottom: 1px solid var(--border);
+      font-size: 11.5px;
+      color: var(--fg-3);
+    }
+    .preview-titlebar .traffic { display: flex; gap: 5px; }
+    .preview-titlebar .dot { width: 11px; height: 11px; border-radius: 50%; }
+    .preview-titlebar .dot.r { background: #ff5f57; }
+    .preview-titlebar .dot.y { background: #ffbd2e; }
+    .preview-titlebar .dot.g { background: #28c941; }
+    .preview-titlebar .grow { flex: 1; }
+    .preview-titlebar .mini { font-size: 11px; }
+
+    .preview-head {
+      display: grid;
+      grid-template-columns: 48px 1fr auto;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 18px 14px;
+      border-bottom: 1px solid var(--border-soft);
+      background: linear-gradient(180deg,
+        color-mix(in srgb, var(--accent-soft) 35%, var(--bg) 65%),
+        var(--bg));
+    }
+    .preview-avatar {
+      width: 48px; height: 48px;
+      border-radius: 4px;
+      background: var(--bg-2);
+      border: 1px solid var(--border-soft);
+      display: grid; place-items: center;
+      color: var(--accent);
+      font-size: 22px;
+    }
+    .preview-id-row {
+      display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    }
+    .preview-name {
+      font-size: 22px; font-weight: 700; color: var(--fg);
+      letter-spacing: -0.2px;
+      margin: 0;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .preview-tag {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      padding: 2px 6px;
+      border-radius: 2px;
+      background: var(--bg-3);
+      color: var(--fg-2);
+    }
+    .preview-role { font-size: 12px; color: var(--fg-2); }
+    .preview-fqdn {
+      margin-top: 4px;
+      font-size: 12px; color: var(--fg-3);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .preview-fqdn .sep { color: var(--fg-faint); margin: 0 6px; }
+    .preview-pill {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--bg-2);
+      border: 1px solid var(--border-soft);
+      border-radius: 3px;
+      padding: 7px 10px;
+      min-width: 130px;
+    }
+    .preview-pill-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent);
+    }
+    .preview-pill-body { display: flex; flex-direction: column; }
+    .preview-pill-label {
+      font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.6px;
+      color: var(--fg-3);
+    }
+    .preview-pill-value {
+      font-size: 12px; color: var(--fg); font-weight: 600;
+    }
+    .preview-pill-sub { font-size: 10px; color: var(--fg-3); }
+
+    /* Mini briefing grid below the header — abbreviated version of the
+       real overview, just enough to communicate "this is a briefing
+       panel, not a generic dashboard". */
+    .preview-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      padding: 14px;
+    }
+    @media (max-width: 820px) {
+      .preview-grid { grid-template-columns: 1fr; }
+      .preview-head { grid-template-columns: 48px 1fr; }
+      .preview-head .preview-pill { grid-column: 1 / -1; }
+    }
+    .preview-card {
+      background: var(--bg-2);
+      border: 1px solid var(--border-soft);
+      border-radius: 3px;
+    }
+    .preview-card-h {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border-soft);
+      background: var(--bg-1);
+      display: flex; align-items: center; gap: 7px;
+    }
+    .preview-card-ico { color: var(--accent); font-size: 12px; }
+    .preview-card-t {
+      font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.7px;
+      font-weight: 700; color: var(--fg-2);
+    }
+    .preview-card-body { padding: 8px 12px; }
+    .preview-kv {
+      display: grid;
+      grid-template-columns: 76px 1fr;
+      gap: 10px;
+      padding: 3px 0;
+      font-size: 11.5px;
+    }
+    .preview-kv + .preview-kv { border-top: 1px dashed var(--border-soft); }
+    .preview-kv-k { color: var(--fg-3); }
+    .preview-kv-v { color: var(--fg); }
+    .preview-kv-v.mono {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+    }
+    .preview-sev {
+      display: grid;
+      grid-template-columns: 56px 1fr 28px;
+      gap: 8px; align-items: center;
+      font-size: 11px;
+      padding: 3px 0;
+    }
+    .preview-sev-l { color: var(--fg-3); }
+    .preview-sev-track {
+      height: 6px; background: var(--bg-1);
+      border-radius: 2px; overflow: hidden;
+      border: 1px solid var(--border-soft);
+    }
+    .preview-sev-fill { display: block; height: 100%; }
+    .preview-sev-n {
+      text-align: right; color: var(--fg-2);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+    }
+
+    .preview-caption {
+      text-align: center;
+      font-size: 12px;
+      color: var(--fg-3);
+      margin-top: 14px;
+    }
+
+    /* ------------------------------------------------------------------
+       Section wrapper
+       ------------------------------------------------------------------ */
+    section.block {
+      padding: 56px 0;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    section.block:last-of-type { border-bottom: 0; }
+    .block h2 {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+      margin: 0 0 8px;
+      color: var(--fg);
+    }
+    .block .sub {
+      font-size: 15px;
+      color: var(--fg-2);
+      margin: 0 0 32px;
+      max-width: 640px;
+    }
+
+    /* ------------------------------------------------------------------
+       Feature grid
+       ------------------------------------------------------------------ */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 820px) {
+      .features { grid-template-columns: 1fr; }
+    }
+    .feat {
+      background: var(--bg-1);
+      border: 1px solid var(--border-soft);
+      border-radius: 4px;
+      padding: 20px 22px;
+    }
+    .feat-ico {
+      font-size: 22px;
+      margin-bottom: 8px;
+      display: block;
+    }
+    .feat h3 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 0 0 6px;
+      color: var(--fg);
+    }
+    .feat p {
+      font-size: 13.5px;
+      color: var(--fg-2);
+      margin: 0;
+      line-height: 1.55;
+    }
+
+    /* ------------------------------------------------------------------
+       Artifacts grid (lifted concept from the real overview)
+       ------------------------------------------------------------------ */
+    .artifact-categories {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 820px) {
+      .artifact-categories { grid-template-columns: 1fr; }
+    }
+    .artifact-cat {
+      background: var(--bg-1);
+      border: 1px solid var(--border-soft);
+      border-radius: 4px;
+      padding: 16px 18px;
+    }
+    .artifact-cat-h {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .artifact-cat-name {
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .artifact-cat-count {
+      font-size: 11px;
+      color: var(--fg-3);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .artifact-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .artifact-item {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 10px;
+      padding: 5px 0;
+      font-size: 13px;
+      align-items: center;
+      border-top: 1px dashed var(--border-soft);
+    }
+    .artifact-item:first-child { border-top: 0; }
+    .artifact-item-ico { font-size: 14px; }
+    .artifact-item-name { color: var(--fg); }
+    .artifact-item-tool {
+      font-size: 10.5px;
+      color: var(--fg-3);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ------------------------------------------------------------------
+       Install / quickstart
+       ------------------------------------------------------------------ */
+    .install-cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 820px) {
+      .install-cols { grid-template-columns: 1fr; }
+    }
+    .install-col {
+      background: var(--bg-1);
+      border: 1px solid var(--border-soft);
+      border-radius: 4px;
+      padding: 20px 22px;
+    }
+    .install-col h3 {
+      font-size: 14px;
+      font-weight: 700;
+      margin: 0 0 4px;
+      color: var(--fg);
+    }
+    .install-col p.sub {
+      font-size: 12.5px;
+      color: var(--fg-3);
+      margin: 0 0 14px;
+    }
+    pre {
+      background: var(--bg);
+      border: 1px solid var(--border-soft);
+      border-radius: 3px;
+      padding: 12px 14px;
+      font-size: 12.5px;
+      color: var(--fg-2);
+      overflow-x: auto;
+      margin: 0;
+      line-height: 1.6;
+      font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+    }
+    pre .comment { color: var(--fg-faint); }
+    pre .accent { color: var(--accent); }
+
+    /* ------------------------------------------------------------------
+       Footer
+       ------------------------------------------------------------------ */
+    footer {
+      padding: 28px 0;
+      background: var(--bg-1);
+      border-top: 1px solid var(--border-soft);
+      font-size: 13px;
+      color: var(--fg-3);
+    }
+    footer .container {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+    footer .links { display: flex; gap: 16px; }
+    footer a { color: var(--fg-3); }
+    footer a:hover { color: var(--accent); }
+  </style>
+</head>
+<body>
+
+  <!-- Top nav -->
+  <nav class="topnav">
+    <div class="topnav-inner">
+      <a class="brand" href="./">
+        <span class="brand-dot"></span>
+        <span>douglas</span>
+      </a>
+      <div class="links">
+        <a href="#features">Features</a>
+        <a href="#artifacts">Artifacts</a>
+        <a href="#install">Install</a>
+        <a href="./demo.html">Demo</a>
+        <a href="https://github.com/yourname/douglas">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <header class="hero">
+    <div class="container hero-inner">
+      <h1>
+        Host-centric <span class="accent">DFIR review</span>
+        for triage CSV output.
+      </h1>
+      <p class="tagline">
+        A single-binary Go tool that turns Zimmerman/EZ Tools and Hayabusa
+        output into a browsable per-host briefing. Runs locally, no cloud,
+        no telemetry, no external dependencies.
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="./demo.html">
+          Try the interactive demo <span class="arrow">→</span>
+        </a>
+        <a class="btn" href="#install">Install</a>
+        <a class="btn ghost" href="https://github.com/yourname/douglas">View on GitHub</a>
+      </div>
+
+      <!-- Inline preview of the host overview header. Honest mock — uses
+           the same CSS variables and structure as the real app. -->
+      <div class="preview">
+        <div class="preview-titlebar">
+          <div class="traffic">
+            <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          </div>
+          <span class="mini">Douglas · WS-FIN-014</span>
+          <span class="grow"></span>
+          <span class="mini" style="color: var(--fg-3);">case acme-2026-05</span>
+          <span class="mini" style="color: var(--fg-3);">🚩 3</span>
+          <span class="mini" style="color: var(--fg-3);">⚙</span>
+        </div>
+        <div class="preview-head">
+          <div class="preview-avatar">💻</div>
+          <div>
+            <div class="preview-id-row">
+              <h1 class="preview-name">WS-FIN-014</h1>
+              <span class="preview-tag">WS</span>
+              <span class="preview-role">Workstation · Finance</span>
+            </div>
+            <div class="preview-fqdn">
+              <span style="color: var(--fg-2);">ws-fin-014.corp.local</span>
+              <span class="sep">·</span>Windows 11 Pro
+              <span class="sep">·</span>10.0.22621.4317
+              <span class="sep">·</span>x64
+            </div>
+          </div>
+          <div class="preview-pill">
+            <span class="preview-pill-dot"></span>
+            <div class="preview-pill-body">
+              <span class="preview-pill-label">Triaged</span>
+              <span class="preview-pill-value">2026-05-26 06:11</span>
+              <span class="preview-pill-sub">3.8 GB collected</span>
+            </div>
+          </div>
+        </div>
+        <div class="preview-grid">
+          <div class="preview-card">
+            <div class="preview-card-h">
+              <span class="preview-card-ico">🛡</span>
+              <span class="preview-card-t">Identity</span>
+            </div>
+            <div class="preview-card-body">
+              <div class="preview-kv"><span class="preview-kv-k">Domain</span><span class="preview-kv-v">CORP</span></div>
+              <div class="preview-kv"><span class="preview-kv-k">OS</span><span class="preview-kv-v">Windows 11 Pro</span></div>
+              <div class="preview-kv"><span class="preview-kv-k">Build</span><span class="preview-kv-v mono">10.0.22621.4317</span></div>
+            </div>
+          </div>
+          <div class="preview-card">
+            <div class="preview-card-h">
+              <span class="preview-card-ico">🌐</span>
+              <span class="preview-card-t">Network</span>
+            </div>
+            <div class="preview-card-body">
+              <div class="preview-kv"><span class="preview-kv-k">IPv4</span><span class="preview-kv-v mono">10.40.2.18</span></div>
+              <div class="preview-kv"><span class="preview-kv-k">MAC</span><span class="preview-kv-v mono">00:1A:2B:5C:7E:9F</span></div>
+              <div class="preview-kv"><span class="preview-kv-k">Gateway</span><span class="preview-kv-v mono">10.40.2.1</span></div>
+            </div>
+          </div>
+          <div class="preview-card">
+            <div class="preview-card-h">
+              <span class="preview-card-ico">🔔</span>
+              <span class="preview-card-t">Detections</span>
+            </div>
+            <div class="preview-card-body">
+              <div class="preview-sev">
+                <span class="preview-sev-l">Critical</span>
+                <span class="preview-sev-track"><span class="preview-sev-fill" style="width:60%; background:var(--crit);"></span></span>
+                <span class="preview-sev-n">6</span>
+              </div>
+              <div class="preview-sev">
+                <span class="preview-sev-l">High</span>
+                <span class="preview-sev-track"><span class="preview-sev-fill" style="width:100%; background:var(--warn);"></span></span>
+                <span class="preview-sev-n">10</span>
+              </div>
+              <div class="preview-sev">
+                <span class="preview-sev-l">Medium</span>
+                <span class="preview-sev-track"><span class="preview-sev-fill" style="width:80%; background:var(--info);"></span></span>
+                <span class="preview-sev-n">8</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="preview-caption">
+        Host overview briefing — Velociraptor theme.
+        <a href="./demo.html">Click around in the live demo →</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Features -->
+  <section class="block" id="features">
+    <div class="container">
+      <h2>What Douglas does</h2>
+      <p class="sub">
+        DFIR analysts have a folder full of triage CSVs and want to triage
+        them quickly. Douglas opens the case, parses every artifact, and
+        gives you per-host context.
+      </p>
+
+      <div class="features">
+        <div class="feat">
+          <span class="feat-ico">📂</span>
+          <h3>Opens a case directory</h3>
+          <p>
+            Point Douglas at the output of <span class="mono">Run-ZimmermanTools.ps1</span>
+            (or any case folder with the same structure). It discovers
+            hosts, parses CSVs, derives identity / hardware / network from
+            the registry hives, and surfaces empty artifacts so you know
+            what was actually collected.
+          </p>
+        </div>
+        <div class="feat">
+          <span class="feat-ico">🦅</span>
+          <h3>Surfaces detections first</h3>
+          <p>
+            Hayabusa rows are categorised by severity at parse time. The
+            host overview shows a histogram per severity bucket so you can
+            pick the host that needs attention before clicking anything.
+            MPLog and EvtxECmd alerts feed the same view.
+          </p>
+        </div>
+        <div class="feat">
+          <span class="feat-ico">🚩</span>
+          <h3>Marks per row</h3>
+          <p>
+            Flag a row from any artifact as suspicious. Marks are scoped
+            to the case folder (no external database). The titlebar shows
+            the count; the timeline view aggregates them across hosts so
+            you can build a case narrative without leaving the app.
+          </p>
+        </div>
+
+        <div class="feat">
+          <span class="feat-ico">⚙</span>
+          <h3>Built-in preprocessor wizard</h3>
+          <p>
+            Run <span class="mono">Run-ZimmermanTools.ps1</span> from
+            inside Douglas. PowerShell discovery, live log streaming,
+            cancel button. Embedded PS1, no separate file to lose.
+          </p>
+        </div>
+        <div class="feat">
+          <span class="feat-ico">⌛</span>
+          <h3>Time-window correlation</h3>
+          <p>
+            Click any row with a timestamp; Douglas shows everything
+            from other artifacts within a ±N-second window. Great for
+            chaining Sysmon process creation to its prefetch/amcache
+            trail.
+          </p>
+        </div>
+        <div class="feat">
+          <span class="feat-ico">🔒</span>
+          <h3>Local-only, single binary</h3>
+          <p>
+            Pure Go, zero external deps. Binds to a random loopback
+            port. CSRF + Host-header allowlist + CSP enforced. No
+            telemetry, no auto-update, no cloud.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Supported artifacts -->
+  <section class="block" id="artifacts">
+    <div class="container">
+      <h2>Supported artifacts</h2>
+      <p class="sub">
+        Out of the box, Douglas parses 20 artifact types from the standard
+        Zimmerman / EZ Tools / Hayabusa pipeline. Adding a new type is
+        ~30 lines in <span class="mono">internal/ingest/types.go</span>.
+      </p>
+
+      <div class="artifact-categories">
+        <div class="artifact-cat">
+          <div class="artifact-cat-h">
+            <span class="artifact-cat-name">Filesystem</span>
+            <span class="artifact-cat-count">3 types</span>
+          </div>
+          <div class="artifact-list">
+            <div class="artifact-item"><span class="artifact-item-ico">🗂</span><span class="artifact-item-name">MFT</span><span class="artifact-item-tool">MFTECmd</span></div>
+            <div class="artifact-item"><span class="artifact-item-ico">🔗</span><span class="artifact-item-name">LNK Files</span><span class="artifact-item-tool">LECmd</span></div>
+            <div class="artifact-item"><span class="artifact-item-ico">📁</span><span class="artifact-item-name">Shellbags</span><span class="artifact-item-tool">SBECmd</span></div>
+          </div>
+        </div>
+
+        <div class="artifact-cat">
+          <div class="artifact-cat-h">
+            <span class="artifact-cat-name">Execution</span>
+            <span class="artifact-cat-count">11 types</span>
+          </div>
+          <div class="artifact-list">
+            <div class="artifact-item"><span class="artifact-item-ico">⚙</span><span class="artifact-item-name">Amcache (6 variants)</span><span class="artifact-item-tool">AmcacheParser</span></div>
+            <div class="artifact-item"><span class="artifact-item-ico">🧩</span><span class="artifact-item-name">Shimcache</span><span class="artifact-item-tool">AppCompatCacheParser</span></div>
+            <div class="artifact-item"><span class="artifact-item-ico">⚡</span><span class="artifact-item-name">Prefetch + Timeline</span><span class="artifact-item-tool">PECmd</span></div>
+            <div class="artifact-item"><span class="artifact-item-ico">↗</span><span class="artifact-item-name">Jump Lists (Auto + Custom)</span><span class="artifact-item-tool">JLECmd</span></div>
+          </div>
+        </div>
+
+        <div class="artifact-cat">
+          <div class="artifact-cat-h">
+            <span class="artifact-cat-name">Detections</span>
+            <span class="artifact-cat-count">2 types</span>
+          </div>
+          <div class="artifact-list">
+            <div class="artifact-item"><span class="artifact-item-ico">🦅</span><span class="artifact-item-name">Hayabusa Detections</span><span class="artifact-item-tool">Hayabusa</span></div>
+            <div class="artifact-item"><span class="artifact-item-ico">🛡</span><span class="artifact-item-name">Defender MPLog</span><span class="artifact-item-tool">native UTF-16</span></div>
+          </div>
+        </div>
+
+        <div class="artifact-cat">
+          <div class="artifact-cat-h">
+            <span class="artifact-cat-name">Logs</span>
+            <span class="artifact-cat-count">1 type</span>
+          </div>
+          <div class="artifact-list">
+            <div class="artifact-item"><span class="artifact-item-ico">📜</span><span class="artifact-item-name">Event Logs</span><span class="artifact-item-tool">EvtxECmd</span></div>
+          </div>
+        </div>
+
+        <div class="artifact-cat">
+          <div class="artifact-cat-h">
+            <span class="artifact-cat-name">System</span>
+            <span class="artifact-cat-count">2 types</span>
+          </div>
+          <div class="artifact-list">
+            <div class="artifact-item"><span class="artifact-item-ico">🌐</span><span class="artifact-item-name">SRUM Network</span><span class="artifact-item-tool">SrumECmd</span></div>
+            <div class="artifact-item"><span class="artifact-item-ico">📥</span><span class="artifact-item-name">BITS Jobs</span><span class="artifact-item-tool">BitsParser</span></div>
+          </div>
+        </div>
+
+        <div class="artifact-cat">
+          <div class="artifact-cat-h">
+            <span class="artifact-cat-name">Registry</span>
+            <span class="artifact-cat-count">1 type</span>
+          </div>
+          <div class="artifact-list">
+            <div class="artifact-item"><span class="artifact-item-ico">🔑</span><span class="artifact-item-name">Registry (RECmd)</span><span class="artifact-item-tool">RECmd</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section class="block" id="install">
+    <div class="container">
+      <h2>Install</h2>
+      <p class="sub">
+        Requires Go 1.21+. Single static binary, no external libraries to vendor.
+      </p>
+
+      <div class="install-cols">
+        <div class="install-col">
+          <h3>Build from source</h3>
+          <p class="sub">Clone the repo and build for your platform.</p>
+<pre><span class="comment"># Clone + build</span>
+git clone https://github.com/yourname/douglas
+cd douglas
+make build
+
+<span class="comment"># Or build for Windows from elsewhere</span>
+GOOS=windows GOARCH=amd64 go build \
+  -ldflags "-s -w" \
+  -o douglas.exe \
+  <span class="accent">./cmd/artifact-review</span></pre>
+        </div>
+
+        <div class="install-col">
+          <h3>Run</h3>
+          <p class="sub">Point at a case folder. Browser opens automatically.</p>
+<pre><span class="comment"># Open an existing case</span>
+./douglas --case /path/to/case
+
+<span class="comment"># Or run with no case and use the wizard to create one</span>
+./douglas
+
+<span class="comment"># Common flags</span>
+--case &lt;dir&gt;         <span class="comment"># open case on launch</span>
+--addr 127.0.0.1:0   <span class="comment"># random port (default)</span>
+--no-open            <span class="comment"># don't auto-open browser</span>
+--upload-workers 2   <span class="comment"># parallel job slots</span></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <div>Douglas · DFIR review tool · MIT licence</div>
+      <div class="links">
+        <a href="https://github.com/yourname/douglas">GitHub</a>
+        <a href="https://github.com/yourname/douglas/issues">Issues</a>
+        <a href="./demo.html">Demo</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
