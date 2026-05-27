@@ -15,7 +15,8 @@ Artifact Review is host-centric:
 - Per-host **Timeline** and **Global Timeline** views aggregate every flag
 
 Supports MFT, Amcache, Shimcache, Prefetch, EvtxECmd, Hayabusa, SRUM,
-RECmd, LECmd, JLECmd, and Microsoft Defender MPLog.
+RECmd, LECmd, JLECmd (Auto + Custom), Shellbags (SBECmd), BITS jobs,
+and Microsoft Defender MPLog.
 
 ## Building
 
@@ -54,11 +55,38 @@ browser. Add `--no-open` if you'd rather paste the URL yourself, or
 
 Flags:
 
-| Flag        | Default        | Meaning                                  |
-|-------------|----------------|------------------------------------------|
-| `--case`    | (none)         | Path to a case directory to open         |
-| `--addr`    | `127.0.0.1:0`  | Bind address (port `0` = random)         |
-| `--no-open` | `false`        | Don't auto-open the browser              |
+| Flag                | Default        | Meaning                                  |
+|---------------------|----------------|------------------------------------------|
+| `--case`            | (none)         | Path to a case directory to open         |
+| `--addr`            | `127.0.0.1:0`  | Bind address (port `0` = random)         |
+| `--no-open`         | `false`        | Don't auto-open the browser              |
+| `--upload-workers`  | `2`            | Parallel upload/preprocess jobs          |
+
+## Preprocessing images (the wizard)
+
+On Windows, Douglas can run `Run-ZimmermanTools.ps1` against a mounted
+image directly from the UI. Click the gear icon in the top-right and
+choose "Preprocess new image" (or "Re-run preprocessor for a host"
+when a case is open).
+
+The wizard collects:
+
+- **Image path** — mounted image root (e.g. `E:\`)
+- **Output root** — case directory to create or update
+- **Host name** — optional; inferred from the SYSTEM hive if blank
+- **Operator** — analyst handle stored in `host.json`'s triage block
+- **Collection method** — defaults to `KAPE -> EZ Tools`
+- **Tools** — checkbox grid; "Run all tools (default)" is on by default
+- **Hayabusa / BitsParser** — addon toggles
+
+PowerShell output streams live into the modal's log panel. On success
+the wizard offers "Open case" which loads the result into Douglas.
+
+If no PowerShell interpreter is found at startup (e.g. on Linux or
+macOS where the script wouldn't work anyway) the wizard entry points
+are hidden. You can still run the script standalone from any Windows
+machine via the root-level `Run-ZimmermanTools.ps1` and import the
+output the regular way.
 
 ## Case folder layout
 
@@ -68,7 +96,7 @@ Flags:
   marks.json                # written by the app
   hosts/                    # or omit and place hosts directly under <case>
     WS-FIN-014/
-      host.json             # optional { id, name, fqdn, os, ip, role, tag, triageStart }
+      host.json             # optional, see "Host metadata" below
       artifacts/            # or omit and place CSVs directly under the host
         $MFT_Output.csv
         Amcache_UnassociatedFileEntries.csv
@@ -79,7 +107,8 @@ Flags:
         SrumECmd_NetworkUsage.csv
         RECmd_Batch.csv
         LECmd_Output.csv
-        JLECmd_Output.csv
+        JLECmd_AutomaticDestinations.csv
+        JLECmd_CustomDestinations.csv
     SRV-DC01/
       ...
 ```
@@ -89,25 +118,142 @@ directory names if missing. `hosts/` and `artifacts/` subdirectories are
 also optional; the loader will look for host folders directly under
 `<case>/` and CSVs directly under each host folder.
 
+### Host metadata
+
+`host.json` describes one investigated machine and feeds the host
+overview page. Minimal shape (legacy, still supported):
+
+```json
+{
+  "id": "WS-FIN-014",
+  "name": "WS-FIN-014",
+  "os": "Windows 11 Pro",
+  "role": "Workstation",
+  "tag": "WS"
+}
+```
+
+Extended shape produced by `Run-ZimmermanTools.ps1` includes nested
+blocks for the host overview cards. Each nested block is optional —
+the UI shows "Not collected" placeholders for missing blocks rather
+than crashing.
+
+```json
+{
+  "id": "WS-FIN-014",
+  "name": "WS-FIN-014",
+  "os": "Windows 11 Pro",
+  "role": "Workstation",
+  "tag": "WS",
+
+  "identity": {
+    "hostname": "WS-FIN-014",
+    "fqdn": "ws-fin-014.corp.local",
+    "domain": "CORP",
+    "os": "Windows 11 Pro",
+    "osVersion": "22H2",
+    "build": "10.0.22621.4317",
+    "arch": "x64",
+    "timeZone": "UTC-05:00 (EST)"
+  },
+  "hardware": {
+    "cpuModel": "Intel Core i7-12700 @ 2.10GHz",
+    "cpuCores": 12,
+    "cpuThreads": 20,
+    "ramBytes": 34359738368,
+    "diskKind": "NVMe",
+    "diskBytes": 549755813888,
+    "diskUsedPercent": 71,
+    "lastBoot": "2025-11-07T08:42:00Z"
+  },
+  "network": {
+    "ipv4": ["10.40.2.18"],
+    "mac": ["00:1A:2B:5C:7E:9F"],
+    "gateway": "10.40.2.1",
+    "dns": ["10.40.0.10", "10.40.0.11"]
+  },
+  "triage": {
+    "method": "KAPE -> EZ Tools",
+    "operator": "j.kowalski@corp",
+    "targets": ["!SANS_Triage", "EventLogs", "RegistryHives"],
+    "startedAt": "2025-11-08T06:00:00Z",
+    "completedAt": "2025-11-08T06:11:00Z",
+    "sizeBytes": 4080218931
+  }
+}
+```
+
+A few schema rules:
+
+- **Sizes in bytes**, not pretty strings (`32 GB` is lossy when summed
+  across hosts; the UI formats for display).
+- **Timestamps as ISO 8601 UTC**. Time zone display lives separately
+  in `identity.timeZone`.
+- **IPv4 and MAC as arrays**, since multi-NIC servers and VMs are
+  common. Single-NIC hosts just have one entry.
+- **Disk used as a percent, not free space** — matches the way
+  analysts read disk pressure.
+
+When running `Run-ZimmermanTools.ps1`, populate analyst-supplied
+fields via `-Operator <email>` and `-CollectionMethod <text>`. Most
+other fields come from offline registry probes against the image
+(hostname, FQDN, domain, OS, arch, time zone, network interfaces);
+hardware specs need a live-machine probe (the HARDWARE hive isn't
+reliably captured in KAPE triage).
+
 ### Artifact recognition
 
 Filenames are matched (case-insensitive) against these patterns:
 
-| Tool                  | Pattern                            | UI name              |
-|-----------------------|------------------------------------|----------------------|
-| MFTECmd               | `*MFT*Output*.csv`                 | MFT                  |
-| AmcacheParser         | `Amcache*FileEntries*.csv`         | Amcache              |
-| AppCompatCacheParser  | `*AppCompatCache*.csv`             | Shimcache            |
-| PECmd                 | `PECmd_Output*.csv`                | Prefetch             |
-| EvtxECmd              | `EvtxECmd_Output*.csv`             | Event Logs           |
-| Hayabusa              | `hayabusa*timeline*.csv`           | Hayabusa Detections  |
-| SrumECmd              | `SrumECmd*Network*.csv`            | SRUM Network         |
-| RECmd                 | `RECmd*Batch*.csv`                 | Registry (RECmd)     |
-| LECmd                 | `LECmd_Output*.csv`                | LNK Files            |
-| JLECmd                | `JLECmd_Output*.csv`               | Jump Lists           |
-| (Windows Defender)    | `MPLog*.log`                       | Defender MPLog       |
+| Tool                  | Pattern                                | UI name                |
+|-----------------------|----------------------------------------|------------------------|
+| MFTECmd               | `*MFT*Output*.csv`                     | MFT                    |
+| AmcacheParser         | `Amcache*FileEntries*.csv`             | Amcache                |
+| AppCompatCacheParser  | `*AppCompatCache*.csv`                 | Shimcache              |
+| PECmd                 | `PECmd_Output*.csv`                    | Prefetch               |
+| EvtxECmd              | `EvtxECmd_Output*.csv`                 | Event Logs             |
+| Hayabusa              | `hayabusa*timeline*.csv`               | Hayabusa Detections    |
+| SrumECmd              | `SrumECmd*Network*.csv`                | SRUM Network           |
+| RECmd                 | `RECmd*Batch*.csv`                     | Registry (RECmd)       |
+| LECmd                 | `LECmd_Output*.csv`                    | LNK Files              |
+| JLECmd                | `JLECmd_AutomaticDestinations*.csv`    | Jump Lists (Auto)      |
+| JLECmd                | `JLECmd_CustomDestinations*.csv`       | Jump Lists (Custom)    |
+| SBECmd                | `*SBECmd*Output*.csv`                  | Shellbags              |
+| BitsParser            | `*BitsParser*.csv`                     | BITS Jobs              |
+| (Windows Defender)    | `MPLog*.log`                           | Defender MPLog         |
 
 Files that don't match any pattern are ignored.
+
+### Note on third-party tools
+
+Most of the artifact parsers come from Eric Zimmerman's EZ Tools suite
+(MFTECmd, AmcacheParser, AppCompatCacheParser, PECmd, EvtxECmd, SrumECmd,
+RECmd, LECmd, JLECmd, SBECmd). Two artifacts are not part of EZ Tools:
+
+- **Hayabusa**: Yamato Security's EVTX-based detection rule engine.
+- **BitsParser**: Community tool for parsing BITS queue manager databases.
+  Several variants exist; Douglas matches any CSV output containing
+  "BitsParser" in the filename and surfaces the most common column set
+  (URL, LocalFile, Owner, State, timestamps).
+
+Both produce CSV output and are bundled separately from EZ Tools.
+
+### Shellbags
+
+SBECmd splits output by source hive: NTUSER.DAT (Explorer-accessed
+folders) and UsrClass.dat (mounted/virtual folders). Douglas merges
+both into one logical artifact view and derives a `Source` column
+(`NTUSER`, `UsrClass`, or `Unknown`) so analysts can filter by hive
+without flipping between tabs.
+
+### Jump Lists pattern change
+
+Older versions of this tool matched `JLECmd_Output.csv` -- a filename
+JLECmd doesn't actually produce. The current registry expects the
+native JLECmd output names (`JLECmd_AutomaticDestinations.csv` and
+`JLECmd_CustomDestinations.csv`). If you have old case folders with
+manually-renamed `JLECmd_Output.csv` files, rerun the preprocessor or
+rename them to the native pattern.
 
 ### Defender MPLog
 
