@@ -238,7 +238,26 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 			continue
 		}
 		path := filepath.Join(artDir, f.Name())
-		rowCount, alertCount := quickStat(path)
+		var rowCount, alertCount int
+		if t.Parser != nil {
+			// Non-CSV artifact (e.g. MPLog). A real row count requires
+			// running the parser, which is expensive at discovery time
+			// for large files. Estimate from file size instead -- exact
+			// count is filled in at LoadArtifact. Severity counting
+			// likewise defers to load time.
+			if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+				// UTF-16 LE: ~2 bytes per char, ~250 chars per line on
+				// MPLog. So size/500 is a rough line estimate. Floor at 1
+				// so the artifact doesn't get classified "empty".
+				est := int(fi.Size() / 500)
+				if est < 1 {
+					est = 1
+				}
+				rowCount = est
+			}
+		} else {
+			rowCount, alertCount = quickStat(path)
+		}
 		// Empty artifacts get reported but NOT added to the sidebar.
 		// quickStat returns 0 either because the source CSV is header-only
 		// or because the header itself failed to parse — both are
@@ -355,7 +374,13 @@ func (s *Store) LoadArtifact(hostID, artifactID string) (*model.Artifact, error)
 		return nil, fmt.Errorf("unknown artifact type: %s", artifactID)
 	}
 
-	rows, err := parseCSV(sum.SourceFile)
+	// Most artifacts are CSV; a few (MPLog) provide their own parser.
+	// Falls back to parseCSV when the type doesn't override.
+	parse := t.Parser
+	if parse == nil {
+		parse = parseCSV
+	}
+	rows, err := parse(sum.SourceFile)
 	if err != nil {
 		return nil, err
 	}

@@ -19,9 +19,31 @@ LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 default: build
 
 .PHONY: build
-build:
+build: check-ps1
 	mkdir -p $(DIST)
 	go build $(LDFLAGS) -o $(DIST)/$(BIN) $(PKG)
+
+# check-ps1 ensures the root-level Run-ZimmermanTools.ps1 (the copy
+# analysts run from a terminal) matches the embedded copy under
+# internal/preprocess/. Diverging copies are the classic stale-duplicate
+# bug; failing the build here is much better than discovering it at
+# runtime when the wizard does something the analyst's standalone
+# script doesn't.
+.PHONY: check-ps1
+check-ps1:
+	@diff -q Run-ZimmermanTools.ps1 internal/preprocess/Run-ZimmermanTools.ps1 \
+		>/dev/null 2>&1 || { \
+		echo "ERROR: Run-ZimmermanTools.ps1 differs between root and internal/preprocess/"; \
+		echo "  root: $$(wc -l < Run-ZimmermanTools.ps1) lines"; \
+		echo "  embedded: $$(wc -l < internal/preprocess/Run-ZimmermanTools.ps1) lines"; \
+		echo "Run 'make sync-ps1' to copy root -> embedded."; \
+		exit 1; \
+	}
+
+.PHONY: sync-ps1
+sync-ps1:
+	cp Run-ZimmermanTools.ps1 internal/preprocess/Run-ZimmermanTools.ps1
+	@echo "synced: Run-ZimmermanTools.ps1 -> internal/preprocess/"
 
 .PHONY: all
 all: linux darwin windows

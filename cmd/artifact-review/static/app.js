@@ -879,6 +879,10 @@ const getTabState = (i) => {
       openFilterCols: new Set(),
       severities: new Set(),
       markedOnly: false,
+      // MPLog tabs default to showing only the relevant subset. The chip
+      // in renderFilterBar flips this. Other artifact types ignore the
+      // flag entirely.
+      mplogShowAll: false,
       sortKey: null,
       sortDir: 'asc',
       expandedEvents: new Set(),
@@ -982,6 +986,18 @@ const deriveSeverity = (artifactId, row) => {
     const lv = (row.Level || '').toLowerCase().trim();
     if (lv === 'error' || lv === 'critical') return 'crit';
     if (lv === 'warning') return 'high';
+  } else if (artifactId === 'mplog') {
+    // MPLog rows carry the canonical severity string directly in the
+    // Severity column (set by the Go parser). Map "warn" to the UI's
+    // "high" bucket so it color-codes consistently with EvtxECmd, which
+    // also surfaces warnings as high.
+    const lv = (row.Severity || '').toLowerCase().trim();
+    if (lv === 'crit' || lv === 'critical') return 'crit';
+    if (lv === 'high') return 'high';
+    if (lv === 'warn' || lv === 'warning') return 'high';
+    if (lv === 'med' || lv === 'medium') return 'med';
+    if (lv === 'low') return 'low';
+    if (lv === 'info' || lv === 'informational') return 'info';
   }
   return 'info';
 };
@@ -1843,6 +1859,19 @@ function renderArtifactTab(tab) {
   if (ui.severities.size > 0) {
     rows = rows.filter(({ r }) => ui.severities.has(deriveSeverity(art.id, r)));
   }
+  // MPLog default-filter: hide everything but BMTelemetry, Detection,
+  // and rows with severity warn or worse. The chip in renderFilterBar
+  // toggles ui.mplogShowAll to skip this filter. Same predicate lives
+  // server-side in mplogFilterRelevant() -- kept in sync so the test
+  // there pins what the UI does.
+  if (art.id === 'mplog' && !ui.mplogShowAll) {
+    rows = rows.filter(({ r }) => {
+      const t = r.EventType;
+      if (t === 'BMTelemetry' || t === 'Detection') return true;
+      const s = r.Severity;
+      return s === 'warn' || s === 'high' || s === 'crit';
+    });
+  }
   if (ui.markedOnly) {
     rows = rows.filter(({ r }) =>
       findMark(tab.hostId, tab.artifactId, rowKeyOf(r))
@@ -1984,6 +2013,17 @@ function renderFilterBar(art, ui, visibleCount) {
       $('kbd', null, '⌘F'),
     ),
     art.id === 'hayabusa' && sevChips,
+    // MPLog has a tighter default-view than other artifacts: most rows
+    // are noise unless an analyst opts in. The chip is sticky per-tab.
+    // ui.mplogShowAll defaults to false; tabs that aren't MPLog never
+    // render this chip.
+    art.id === 'mplog' && $('button', {
+      class: 'chip' + (ui.mplogShowAll ? '' : ' on'),
+      title: ui.mplogShowAll
+        ? 'Showing all events. Click to show only relevant ones (BMTelemetry, Detection, warn+).'
+        : 'Showing the default-relevant subset (BMTelemetry, Detection, warn-severity or higher). Click to see everything.',
+      onclick: () => { ui.mplogShowAll = !ui.mplogShowAll; render(); },
+    }, ui.mplogShowAll ? '⛯ All events' : '⛯ Relevant only'),
     $('button', {
       class: 'chip' + (ui.markedOnly ? ' on' : ''),
       onclick: () => { ui.markedOnly = !ui.markedOnly; render(); },

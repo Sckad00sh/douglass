@@ -15,6 +15,10 @@ type ArtifactType struct {
 	// a CSV for this artifact. First match wins; see Recognize().
 	FilenamePattern *regexp.Regexp
 	Columns         []model.Column
+	// Parser, if set, overrides the default CSV reader for this type.
+	// Used by artifacts whose on-disk format isn't a CSV (e.g. MPLog,
+	// which is UTF-16 LE semi-structured text). Nil means "use parseCSV".
+	Parser func(path string) ([]model.Row, error)
 }
 
 // ArtifactTypes is the canonical registry. Order matters: more specific
@@ -338,7 +342,7 @@ var ArtifactTypes = []ArtifactType{
 		ArtifactType: model.ArtifactType{
 			ID: "jumplist", Name: "Jump Lists", Icon: "↗", Tool: "JLECmd",
 			Category: "Execution", File: "JLECmd_Output.csv",
-			PrimaryTime: "LastModified",
+			PrimaryTime:   "LastModified",
 			ContextFields: []string{"TargetPath", "AppId", "EntryNumber"},
 		},
 		FilenamePattern: regexp.MustCompile(`(?i)JLECmd_Output.*\.csv$`),
@@ -349,6 +353,38 @@ var ArtifactTypes = []ArtifactType{
 			{Key: "AppId", Label: "AppID", Width: 180, Mono: true},
 			{Key: "TargetPath", Label: "Target Path", Width: 320, Mono: true},
 			{Key: "EntryNumber", Label: "Entry #", Width: 70, Numeric: true},
+		},
+	},
+	{
+		// Defender's MPLog: UTF-16 LE semi-structured log files at
+		// C:\ProgramData\Microsoft\Windows Defender\Support\MPLog-*.log.
+		// Unlike every other artifact, we don't go through EZ Tools --
+		// the parser (mplog.go) reads the .log files directly.
+		ArtifactType: model.ArtifactType{
+			ID: "mplog", Name: "Defender MPLog", Icon: "🛡", Tool: "MPLog",
+			Category:    "Detections",
+			File:        "MPLog-YYYYMMDD-HHMMSS.log",
+			PrimaryTime: "Timestamp",
+			// Curated for pivot/correlation chips: who, what, where, why.
+			ContextFields: []string{
+				"ProcessName", "ImagePath", "FilePath",
+				"RuleOrThreat", "ParentProcess", "Action",
+			},
+		},
+		FilenamePattern: regexp.MustCompile(`(?i)MPLog.*\.log$`),
+		Parser:          parseMPLog,
+		Columns: []model.Column{
+			{Key: "Timestamp", Label: "Timestamp", Width: 180, Mono: true},
+			{Key: "EventType", Label: "Type", Width: 130},
+			{Key: "Severity", Label: "Sev", Width: 60, Severity: true},
+			{Key: "ProcessName", Label: "Process", Width: 180, Mono: true},
+			{Key: "ProcessId", Label: "PID", Width: 70, Numeric: true},
+			{Key: "ImagePath", Label: "Image Path", Width: 320, Mono: true},
+			{Key: "FilePath", Label: "File Path", Width: 320, Mono: true},
+			{Key: "RuleOrThreat", Label: "Rule / Threat", Width: 280},
+			{Key: "Action", Label: "Action", Width: 200, Mono: true},
+			{Key: "ParentProcess", Label: "Parent Process", Width: 280, Mono: true},
+			{Key: "Detail", Label: "Detail", Width: 360},
 		},
 	},
 }

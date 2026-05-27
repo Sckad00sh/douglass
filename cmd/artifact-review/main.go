@@ -27,7 +27,9 @@ import (
 	"time"
 
 	"github.com/example/artifact-review/internal/ingest"
+	"github.com/example/artifact-review/internal/jobs"
 	"github.com/example/artifact-review/internal/marks"
+	"github.com/example/artifact-review/internal/preprocess"
 	"github.com/example/artifact-review/internal/server"
 )
 
@@ -38,6 +40,10 @@ func main() {
 	caseDir := flag.String("case", "", "path to a case directory to open on launch")
 	addr := flag.String("addr", "127.0.0.1:0", "address to bind the local UI server")
 	noOpen := flag.Bool("no-open", false, "do not open the system browser on launch")
+	// Concurrent upload/preprocess job count. 2 is the locked-in default
+	// from the v0.11.0 design discussion: gets parallelism without
+	// thrashing CPU-bound EZ Tools (when v0.11.1 lands those).
+	uploadWorkers := flag.Int("upload-workers", 2, "number of concurrent upload/preprocess jobs")
 	flag.Parse()
 
 	// Carve the embedded FS down to the static/ subdirectory so URLs map
@@ -49,6 +55,21 @@ func main() {
 
 	cases := ingest.NewStore()
 	mks := marks.New()
+	js := jobs.NewStore(*uploadWorkers)
+	defer js.Close()
+
+	// Preprocessor: optional. Construction discovers PowerShell on the
+	// PATH and extracts the embedded PS1 to a temp file. Failure is
+	// not fatal -- /api/preprocess returns 503 and the UI suppresses
+	// the wizard. This is the expected path on Linux/macOS where the
+	// PS1 wouldn't work anyway.
+	prep, err := preprocess.New()
+	if err != nil {
+		log.Printf("preprocessor disabled: %v", err)
+	} else {
+		log.Printf("preprocessor ready: %s", prep.PSPath())
+		defer prep.Close()
+	}
 
 	if *caseDir != "" {
 		if err := cases.Open(*caseDir); err != nil {
@@ -62,7 +83,7 @@ func main() {
 		log.Printf("no --case provided; use the Import button in the UI")
 	}
 
-	srv := server.New(cases, mks, assets)
+	srv := server.New(cases, mks, js, prep, assets)
 	httpSrv := &http.Server{
 		Handler:      srv.Routes(),
 		ReadTimeout:  30 * time.Second,

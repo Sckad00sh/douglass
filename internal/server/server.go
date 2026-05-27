@@ -1,33 +1,53 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/example/artifact-review/internal/ingest"
+	"github.com/example/artifact-review/internal/jobs"
 	"github.com/example/artifact-review/internal/marks"
 	"github.com/example/artifact-review/internal/model"
+	"github.com/example/artifact-review/internal/preprocess"
 )
 
-// Server wires together the ingest store, mark store, and static assets.
+// Server wires together the ingest store, mark store, jobs tracker,
+// preprocessor runner (optional, may be nil if PowerShell isn't
+// available), and static assets.
 type Server struct {
-	cases  *ingest.Store
-	marks  *marks.Store
-	assets fs.FS
+	cases      *ingest.Store
+	marks      *marks.Store
+	jobs       *jobs.Store
+	preprocess *preprocess.Runner // may be nil
+	assets     fs.FS
 }
 
 // New constructs a server around the given dependencies. assets must be a
-// filesystem rooted at the directory containing index.html.
-func New(cases *ingest.Store, marks *marks.Store, assets fs.FS) *Server {
-	return &Server{cases: cases, marks: marks, assets: assets}
+// filesystem rooted at the directory containing index.html. preprocRunner
+// may be nil; when nil, the /api/preprocess endpoints return 503 with a
+// "no PowerShell interpreter found" message, and the UI suppresses the
+// preprocess wizard entry points.
+func New(cases *ingest.Store, marks *marks.Store, jobsStore *jobs.Store, preprocRunner *preprocess.Runner, assets fs.FS) *Server {
+	return &Server{
+		cases:      cases,
+		marks:      marks,
+		jobs:       jobsStore,
+		preprocess: preprocRunner,
+		assets:     assets,
+	}
 }
 
 // Routes returns an http.Handler with all API + static routes wired up.
@@ -40,6 +60,13 @@ func New(cases *ingest.Store, marks *marks.Store, assets fs.FS) *Server {
 //	GET  /api/marks?host=        list marks (optionally scoped to a host)
 //	POST /api/marks              upsert a mark (body: full Mark JSON)
 //	DEL  /api/marks/{id}         delete a mark
+//	POST /api/upload?host=&type= multipart upload of an artifact CSV
+//	GET  /api/jobs               list active + recent jobs
+//	GET  /api/jobs/{id}          single job detail
+//	DEL  /api/jobs/{id}          cancel a running job
+//	GET  /api/preprocess         info: { available, interpreter, scriptPath }
+//	GET  /api/preprocess/tools   list of valid -ToolFilter values
+//	POST /api/preprocess         { config } - run preprocessor as a job
 //	GET  /api/health             liveness check
 //	GET  /*                      static UI assets
 func (s *Server) Routes() http.Handler {
@@ -52,6 +79,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/artifact", s.handleArtifact)
 	mux.HandleFunc("/api/marks", s.handleMarks)
 	mux.HandleFunc("/api/marks/", s.handleMarkByID)
+	mux.HandleFunc("/api/upload", s.handleUpload)
+	mux.HandleFunc("/api/jobs", s.handleJobs)
+	mux.HandleFunc("/api/jobs/", s.handleJobByID)
+	mux.HandleFunc("/api/preprocess", s.handlePreprocess)
+	mux.HandleFunc("/api/preprocess/tools", s.handlePreprocessTools)
 	mux.Handle("/", s.staticHandler())
 	return localOnly(mux)
 }
@@ -457,6 +489,491 @@ func (s *Server) handleMarkByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// uploadMaxBytes is the per-request body cap for /api/upload. 10 GB
+// is the locked-in figure from the v0.11.0 design. Covers every realistic
+// artifact (including outlier MFTs and big EVTX bundles); above this is
+// almost certainly a memory dump or a mistake.
+const uploadMaxBytes int64 = 10 * 1024 * 1024 * 1024
+
+// sanitizedFilenameRe matches the safe character set for filenames
+// we'll touch on disk. Letters, digits, dot, dash, underscore, space,
+// and the dollar sign (so $MFT survives). Anything else gets replaced
+// with underscore in sanitizeUploadFilename.
+var sanitizedFilenameRe = regexp.MustCompile(`[^A-Za-z0-9._\- $]`)
+
+// handleUpload accepts a multipart/form-data POST with a single file
+// and routes it into the case folder. v0.11.0 supports CSV passthrough
+// only -- the uploaded file must match an existing artifact type's
+// filename pattern, and is copied straight into the host's artifacts/
+// folder. Raw artifact preprocessing (running EZ Tools) ships in
+// v0.11.1.
+//
+// Query parameters:
+//
+//	host    target host ID (must already exist in the case)
+//	replace if "1", overwrite an existing artifact with the same target
+//	        filename. Without this, an existing file makes the upload
+//	        fail with 409 Conflict -- the UI prompts and re-submits
+//	        with replace=1.
+//
+// Form fields:
+//
+//	file    the file to upload (required)
+//
+// Response: { jobId, status } -- the upload is async; poll /api/jobs.
+//
+// Security invariants enforced here:
+//   - Body size cap via http.MaxBytesReader
+//   - Host ID must exist in the case (no creating hosts via upload)
+//   - Filename sanitized to a safe character set; analyst-provided name
+//     is used only for display
+//   - Output path verified to live under the host's artifacts/ folder
+//     after filepath.Join (defense against pathological filenames)
+//   - File must match an artifact type's filename pattern. CSV-only
+//     for v0.11.0 -- raw artifacts get a clear "not yet supported"
+//     error.
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	caseDir := s.cases.CaseDir()
+	if caseDir == "" {
+		writeErr(w, http.StatusBadRequest, "no case open")
+		return
+	}
+
+	// Cap the upload before parsing the multipart body. http.MaxBytesReader
+	// returns an error on read once the limit is hit; multipart parsing
+	// will surface that to the user as a 400.
+	r.Body = http.MaxBytesReader(w, r.Body, uploadMaxBytes)
+
+	hostID := r.URL.Query().Get("host")
+	if hostID == "" {
+		writeErr(w, http.StatusBadRequest, "host query parameter required")
+		return
+	}
+	replace := r.URL.Query().Get("replace") == "1"
+
+	// Verify the host exists. Looking up by ID against the live case
+	// description -- prevents the upload endpoint from being used to
+	// create new host directories via attacker-controlled hostID values.
+	// We only need to know whether a match exists; the host fields
+	// themselves aren't used after this check (the destination path
+	// is built from hostID alone, which we just validated).
+	cs := s.cases.Case()
+	if cs == nil {
+		writeErr(w, http.StatusBadRequest, "no case open")
+		return
+	}
+	hostFound := false
+	for _, h := range cs.Hosts {
+		if h.ID == hostID {
+			hostFound = true
+			break
+		}
+	}
+	if !hostFound {
+		writeErr(w, http.StatusBadRequest, "unknown host: "+hostID)
+		return
+	}
+
+	// Parse the multipart upload. 32 MB is the in-memory cap for parts
+	// (form fields + small files); larger files spill to a temp file
+	// the http package manages. The overall body cap from
+	// http.MaxBytesReader still applies.
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid multipart body: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "file field required: "+err.Error())
+		return
+	}
+	defer file.Close()
+
+	if header.Size > uploadMaxBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			"file too large (max 10 GB)")
+		return
+	}
+
+	// Sanitize the analyst-provided filename. Strip any directory path
+	// components -- some browsers include the full path on Windows.
+	displayName := filepath.Base(header.Filename)
+	if displayName == "" || displayName == "." || displayName == "/" {
+		writeErr(w, http.StatusBadRequest, "invalid filename")
+		return
+	}
+	safeName := sanitizeUploadFilename(displayName)
+	if safeName == "" {
+		writeErr(w, http.StatusBadRequest, "filename has no usable characters")
+		return
+	}
+
+	// Match against the artifact-type registry. CSV passthrough only
+	// for v0.11.0 -- non-matching files are rejected with a clear hint.
+	artType := ingest.Recognize(safeName)
+	if artType == nil {
+		writeErr(w, http.StatusBadRequest,
+			"file does not match any known artifact type by name. "+
+				"For raw-artifact processing (MFT, EVTX, registry hives, "+
+				"etc.), check back in v0.11.1.")
+		return
+	}
+	// CSV-only check. The Parser field on the artifact type indicates
+	// the file isn't a CSV (currently only MPLog). v0.11.0 isn't yet
+	// running tool preprocessors, so reject non-CSV uploads even when
+	// they have a parser -- they need the preprocessing path that
+	// ships next.
+	//
+	// Exception: artifacts whose Parser reads the file as-is (like
+	// MPLog reading a raw .log) can pass through too -- we're just
+	// copying the file, not transforming it. So the rule is: if the
+	// artifact's File name matches a CSV extension OR has its own
+	// Parser, accept. Otherwise reject.
+	if !strings.HasSuffix(strings.ToLower(safeName), ".csv") && artType.Parser == nil {
+		writeErr(w, http.StatusBadRequest,
+			"only CSV uploads are supported in v0.11.0 (this file looks like "+
+				"a raw artifact that needs preprocessing)")
+		return
+	}
+
+	// Compute the final destination path and verify it stays inside the
+	// host's artifacts folder. filepath.Join cleans but doesn't reject
+	// "../" -- we check explicitly that the joined path has the host's
+	// artifacts dir as a prefix.
+	artifactsDir := filepath.Join(caseDir, "hosts", hostID, "artifacts")
+	destPath := filepath.Join(artifactsDir, safeName)
+	cleanDest, err := filepath.Abs(destPath)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "resolve dest path: "+err.Error())
+		return
+	}
+	cleanArt, err := filepath.Abs(artifactsDir)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "resolve artifacts dir: "+err.Error())
+		return
+	}
+	if !strings.HasPrefix(cleanDest, cleanArt+string(filepath.Separator)) {
+		writeErr(w, http.StatusBadRequest, "filename escapes artifacts directory")
+		return
+	}
+
+	// Make sure the artifacts dir exists.
+	if err := os.MkdirAll(cleanArt, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, "create artifacts dir: "+err.Error())
+		return
+	}
+
+	// If the destination already exists and replace wasn't set, 409
+	// the request so the UI can prompt the analyst.
+	if _, err := os.Stat(cleanDest); err == nil && !replace {
+		writeErr(w, http.StatusConflict,
+			"artifact already exists at this filename; re-upload with replace=1 to overwrite")
+		return
+	}
+
+	// Stream the uploaded body into a temp file inside the case dir.
+	// The .uploads dir is hidden from the artifact scan (Recognize
+	// won't match its contents), so an interrupted upload leaves a
+	// stray file but doesn't pollute the case.
+	tempDir := filepath.Join(caseDir, ".uploads")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, "create temp dir: "+err.Error())
+		return
+	}
+	tempFile, err := os.CreateTemp(tempDir, "upload-*.tmp")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "create temp file: "+err.Error())
+		return
+	}
+	tempPath := tempFile.Name()
+
+	bytesCopied, copyErr := io.Copy(tempFile, file)
+	closeErr := tempFile.Close()
+	if copyErr != nil {
+		_ = os.Remove(tempPath)
+		writeErr(w, http.StatusBadRequest, "upload failed: "+copyErr.Error())
+		return
+	}
+	if closeErr != nil {
+		_ = os.Remove(tempPath)
+		writeErr(w, http.StatusInternalServerError, "close temp file: "+closeErr.Error())
+		return
+	}
+
+	// Enqueue the rest of the work as a background job: move the temp
+	// file into place, then rescan the case so the new artifact shows
+	// up in the next /api/case fetch.
+	work := func(ctx context.Context, j *jobs.Job) (string, error) {
+		s.jobs.SetProgress(j.ID, "moving file into case")
+
+		// Best-effort cleanup on cancel.
+		select {
+		case <-ctx.Done():
+			_ = os.Remove(tempPath)
+			return "", ctx.Err()
+		default:
+		}
+
+		// If we're replacing, remove the existing file first. os.Rename
+		// across filesystems can fail; case temp dir + artifacts dir
+		// share the case folder so this should always be cheap.
+		if replace {
+			if _, statErr := os.Stat(cleanDest); statErr == nil {
+				if err := os.Remove(cleanDest); err != nil {
+					return "", err
+				}
+			}
+		}
+		if err := os.Rename(tempPath, cleanDest); err != nil {
+			return "", err
+		}
+
+		s.jobs.SetProgress(j.ID, "rescanning case")
+		if err := s.cases.Open(caseDir); err != nil {
+			return "", err
+		}
+
+		s.jobs.SetProgress(j.ID, "complete")
+		return artType.ID, nil
+	}
+
+	j := s.jobs.Enqueue(jobs.KindUpload, hostID, displayName, "", work)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"jobId":  j.ID,
+		"status": j.Status,
+		"size":   bytesCopied,
+	})
+}
+
+// handleJobs returns the list of active and recent jobs. Front-end
+// polls this every second while there are non-terminal jobs.
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jobs": s.jobs.List(),
+	})
+}
+
+// handleJobByID is GET (single job detail) or DELETE (cancel).
+func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "job id required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		j := s.jobs.Get(id)
+		if j == nil {
+			writeErr(w, http.StatusNotFound, "job not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, j)
+	case http.MethodDelete:
+		if !s.jobs.Cancel(id) {
+			writeErr(w, http.StatusNotFound, "job not found or already terminal")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"cancelled": id})
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// sanitizeUploadFilename returns a filesystem-safe rendering of the
+// given filename. Path components are stripped (filepath.Base done by
+// the caller), then non-safe characters are replaced with underscore.
+// Returns "" if nothing survives.
+func sanitizeUploadFilename(name string) string {
+	if name == "" {
+		return ""
+	}
+	// Strip any embedded NULs (shouldn't appear but defensive).
+	name = strings.ReplaceAll(name, "\x00", "")
+	// Replace anything outside the safe set.
+	clean := sanitizedFilenameRe.ReplaceAllString(name, "_")
+	// Trim leading/trailing whitespace and dots (Windows hates trailing
+	// dots, and leading dots make files hidden on Unix).
+	clean = strings.Trim(clean, ". ")
+	if clean == "" {
+		return ""
+	}
+	// Cap length defensively. NTFS/ext4 both allow 255-byte filenames;
+	// 200 leaves room for OS suffixes.
+	if len(clean) > 200 {
+		clean = clean[:200]
+	}
+	return clean
+}
+
+// handlePreprocess is the dual-method endpoint for preprocessor info
+// and invocation.
+//
+//	GET  -> { available, interpreter, scriptPath }
+//	POST -> validate config, enqueue a job, return { jobId }
+//
+// When the runner is nil (no PowerShell available on this host),
+// GET still works and returns { available: false, ... }; POST returns
+// 503 with the same message. This shape lets the UI decide whether
+// to even show the wizard entry points.
+func (s *Server) handlePreprocess(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		resp := map[string]any{"available": s.preprocess != nil}
+		if s.preprocess != nil {
+			resp["interpreter"] = s.preprocess.PSPath()
+			resp["scriptPath"] = s.preprocess.ScriptPath()
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+
+	case http.MethodPost:
+		if s.preprocess == nil {
+			writeErr(w, http.StatusServiceUnavailable,
+				"preprocessor not available: no PowerShell interpreter found")
+			return
+		}
+		// Cap body size -- the config is small JSON, anything bigger
+		// is malformed or hostile.
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+		var cfg preprocess.Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		// Validate before enqueuing so the UI sees errors synchronously.
+		// The Run() method will also validate, but failing early gives
+		// a much better user experience than a queued job that
+		// immediately fails.
+		if err := cfg.Validate(); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Enqueue the work. The job's progress field carries the
+		// streamed PowerShell output; the front-end polls /api/jobs/{id}
+		// to display it. We cap the displayed progress at the last
+		// ~32 KB so the polling response stays small -- the full log
+		// would be hundreds of KB for a real preprocessor run.
+		hostName := cfg.HostName
+		if hostName == "" {
+			hostName = "(inferred from image)"
+		}
+		var logMu sync.Mutex
+		var logBuf strings.Builder
+		// The PS1 emits "DOUGLAS_RESULT_CASE_DIR=<path>" near the end
+		// on success. We capture it from the line stream so we know
+		// the actual case dir to open (which is OutputRoot/<CaseId>,
+		// not OutputRoot itself -- the PS1 picks CaseId at runtime).
+		// Read+written under logMu; the streaming goroutine writes
+		// during the callback, the work goroutine reads it after
+		// Run returns.
+		var resolvedCaseDir string
+		work := func(ctx context.Context, j *jobs.Job) (string, error) {
+			// Create the OutputRoot directory tree before the PS1 runs.
+			// Doing this here (not in the validator) means a cancelled
+			// or abandoned wizard form never leaves stray dirs behind --
+			// the mkdir only happens once the analyst has committed to
+			// the run. PS1 also uses New-Item -Force internally, so
+			// this is belt-and-braces; the explicit MkdirAll surfaces
+			// permission/FS errors as a clean Go error rather than a
+			// PowerShell stack trace.
+			if err := os.MkdirAll(cfg.OutputRoot, 0o755); err != nil {
+				return "", fmt.Errorf("create output root: %w", err)
+			}
+			s.jobs.SetProgress(j.ID, "starting preprocessor")
+			exitCode, runErr := s.preprocess.Run(ctx, cfg, func(line string) {
+				// Check for the result marker FIRST -- if matched, we
+				// capture the path but DON'T add the line to the log
+				// buffer. The marker is internal contract output; the
+				// analyst doesn't need to see it in the streaming log
+				// panel (the path is surfaced via the "Open case"
+				// button on success).
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "DOUGLAS_RESULT_CASE_DIR=") {
+					logMu.Lock()
+					resolvedCaseDir = strings.TrimPrefix(trimmed, "DOUGLAS_RESULT_CASE_DIR=")
+					logMu.Unlock()
+					return
+				}
+				logMu.Lock()
+				logBuf.WriteString(line)
+				logBuf.WriteByte('\n')
+				// Cap the log for the progress field. Keep the tail
+				// (most recent) since that's what an analyst watching
+				// progress wants to see.
+				if logBuf.Len() > 32*1024 {
+					full := logBuf.String()
+					logBuf.Reset()
+					logBuf.WriteString("... (output truncated) ...\n")
+					logBuf.WriteString(full[len(full)-30*1024:])
+				}
+				snapshot := logBuf.String()
+				logMu.Unlock()
+				s.jobs.SetProgress(j.ID, snapshot)
+			})
+			if runErr != nil {
+				return "", runErr
+			}
+			if exitCode != 0 {
+				return "", fmt.Errorf("preprocessor exited with code %d", exitCode)
+			}
+			// Pick the path to open: the marker if the PS1 emitted it,
+			// otherwise fall back to OutputRoot. The fallback covers
+			// the edge case where an older PS1 version is somehow
+			// running (shouldn't happen since the script is embedded,
+			// but defensive). Falling back to OutputRoot was the
+			// previous behavior and at worst makes the case appear
+			// "empty" -- known UX, no crash.
+			logMu.Lock()
+			caseToOpen := resolvedCaseDir
+			logMu.Unlock()
+			if caseToOpen == "" {
+				caseToOpen = cfg.OutputRoot
+			}
+			if err := s.cases.Open(caseToOpen); err != nil {
+				return "", fmt.Errorf("preprocessor finished but open failed: %w", err)
+			}
+			// Return the resolved case dir as the result ID. The wizard
+			// uses this for the "Open case" button so the client-side
+			// bootstrap() picks up the right directory (matching the
+			// server's view).
+			return caseToOpen, nil
+		}
+
+		j := s.jobs.Enqueue(jobs.KindPreprocess, "", hostName,
+			"Run-ZimmermanTools.ps1", work)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"jobId":  j.ID,
+			"status": j.Status,
+		})
+		return
+
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "GET or POST required")
+	}
+}
+
+// handlePreprocessTools returns the canonical list of -ToolFilter
+// values for the UI's checkbox list. Static; computed once.
+func (s *Server) handlePreprocessTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tools": preprocess.ToolFilter,
+	})
 }
 
 // staticHandler serves the embedded UI. Falls through to index.html for any

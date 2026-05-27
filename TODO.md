@@ -38,6 +38,26 @@ Things to tackle next, roughly ordered by impact.
   (`~/.config/douglas/profile.json` elsewhere). Flat list, no
   bundles. Picked up when there's real workflow demand.
 
+## MPLog follow-ups
+
+The MPLog parser ships in v0.10.5 covering the patterns we saw in a real
+51k-line sample. A few things to revisit when we get more samples:
+
+- [ ] **Real Defender detection lines**. The current parser has a
+  `Detection` EventType wired but never ground-truthed against a real
+  `THREAT:` block. Need a sample MPLog from a machine that actually
+  caught malware to pin the detection-line regex + severity (probably
+  `high`/`crit`).
+- [ ] **Quarantine block parsing**. We see 376 `Quarantine ID:` lines
+  in the sample but they're continuation-style (preceded by a
+  `Threat Name:` line we don't currently parse). Treat them as their
+  own block type when we have a sample with non-zero-GUID quarantine
+  IDs to ground-truth against.
+- [ ] **Multi-file MPLog**. Defender rotates these. Currently each
+  `.log` file becomes its own artifact tab. Worth considering a
+  combined view that merges adjacent rotation files into one
+  chronological set.
+
 ## Polish
 
 (empty -- add as things come up)

@@ -15,7 +15,7 @@ Artifact Review is host-centric:
 - Per-host **Timeline** and **Global Timeline** views aggregate every flag
 
 Supports MFT, Amcache, Shimcache, Prefetch, EvtxECmd, Hayabusa, SRUM,
-RECmd, LECmd, JLECmd output.
+RECmd, LECmd, JLECmd, and Microsoft Defender MPLog.
 
 ## Building
 
@@ -105,8 +105,25 @@ Filenames are matched (case-insensitive) against these patterns:
 | RECmd                 | `RECmd*Batch*.csv`                 | Registry (RECmd)     |
 | LECmd                 | `LECmd_Output*.csv`                | LNK Files            |
 | JLECmd                | `JLECmd_Output*.csv`               | Jump Lists           |
+| (Windows Defender)    | `MPLog*.log`                       | Defender MPLog       |
 
 Files that don't match any pattern are ignored.
+
+### Defender MPLog
+
+Unlike the EZ Tools artifacts above, MPLog files are read directly --
+no preprocessor needed. Drop `MPLog-YYYYMMDD-HHMMSS.log` from
+`C:\ProgramData\Microsoft\Windows Defender\Support\` into the host's
+`artifacts/` folder and it parses on first open. Files are UTF-16 LE
+with BOM; we decode at load time.
+
+The parser drops `EstimatedImpact` lines (10k+ rows of pure
+process-scan noise per file) at parse time and classifies the rest into
+event types: `BMTelemetry`, `MiniFilterScan`, `EMSScan`, `ASRRule`,
+`AMSI`, `EngineEvent`, `Detection`, `Other`. The MPLog tab opens with
+a "Relevant only" toggle on by default -- shows only BMTelemetry,
+Detection, and warn-or-higher severity rows (typically a few hundred
+events from a 50k-line file). Click the chip to see everything.
 
 ## Marks
 
