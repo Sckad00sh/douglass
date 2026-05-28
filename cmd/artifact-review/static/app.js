@@ -855,6 +855,12 @@ const state = {
   tabs: [],          // [{ kind: 'artifact'|'host-timeline'|'global-timeline', hostId, artifactId, label }]
   activeTab: -1,
   artifactCache: {}, // key "host|art" -> full artifact
+  // triageCache: host id -> triage.Result. Populated lazily by the host
+  // overview's Quick Hits panel. Persists for the session so re-renders
+  // (which happen on every render()) don't refetch. collapsedTriage
+  // tracks which groups the analyst has collapsed, keyed "host|groupId".
+  triageCache: {},
+  collapsedTriage: new Set(),
   searchHost: '',
   theme: loadTheme(),
   // Upload-related state (v0.11.0).
@@ -915,6 +921,7 @@ const api = {
   }),
   browse: (dir) => fetchJSON('/api/browse' + (dir ? '?dir=' + encodeURIComponent(dir) : '')),
   artifact: (h, a) => fetchJSON(`/api/artifact?h=${encodeURIComponent(h)}&a=${encodeURIComponent(a)}`),
+  triage: (host) => fetchJSON(`/api/triage?host=${encodeURIComponent(host)}`),
   listMarks: (host) => fetchJSON('/api/marks' + (host ? `?host=${encodeURIComponent(host)}` : '')),
   saveMark: (m) => fetchJSON('/api/marks', {
     method: 'POST',
@@ -1960,6 +1967,15 @@ const openTab = (tab) => {
     t.kind === tab.kind && t.hostId === tab.hostId && t.artifactId === tab.artifactId);
   if (i >= 0) {
     state.activeTab = i;
+    // If this open carried a deep-link target row, apply it to the
+    // already-open tab so "open in <artifact>" re-targets an existing
+    // tab instead of being a no-op. The artifact view reads + clears
+    // targetRowKey on render and sets a one-shot force-reveal flag so
+    // mountVirtualTable scrolls to the row even though the tab didn't
+    // change.
+    if (tab.targetRowKey) {
+      state.tabs[i].targetRowKey = tab.targetRowKey;
+    }
   } else {
     state.tabs.push(tab);
     state.activeTab = state.tabs.length - 1;
@@ -2895,6 +2911,39 @@ function renderArtifactTab(tab) {
     });
   }
 
+  // Deep-link target resolution. When a tab was opened with a
+  // targetRowKey (e.g. from an "open in <artifact>" link in the triage
+  // panel, a pivot result, or the timeline), find that row's position
+  // in the current filtered/sorted view and select it. We match on the
+  // durable rowKey, not a stored index, because indices shift with
+  // sorting and filtering. Resolve once, then clear the target so later
+  // re-renders (row clicks, scrolling) don't keep yanking selection
+  // back to it.
+  if (tab.targetRowKey) {
+    // Match on the durable content hash first (marks, pivots, timeline
+    // all key this way). Fall back to the raw __row index, which is how
+    // the triage panel keys its findings -- it has the source row's
+    // __row on hand and emitting that avoids duplicating rowKeyOf's
+    // hashing in the Go backend.
+    let idx = rows.findIndex(({ r }) => rowKeyOf(r) === tab.targetRowKey);
+    if (idx < 0) idx = rows.findIndex(({ r }) => r.__row === tab.targetRowKey);
+    if (idx >= 0) {
+      ui.selectedRow = idx;
+      // Force mountVirtualTable to scroll this row into view even if
+      // the tab was already open (the normal path would restore the
+      // prior scroll offset and the newly-selected row could be off
+      // screen). Cleared after it's copied onto the table element.
+      ui._forceReveal = true;
+    } else {
+      // The target row isn't in the current view -- almost always
+      // because a filter (severity chips, "marked only", MPLog
+      // default filter) is hiding it. Surface a hint rather than
+      // silently selecting the wrong row.
+      toast('Row is hidden by an active filter — clear filters to see it', false);
+    }
+    delete tab.targetRowKey;
+  }
+
   // clamp selection
   if (ui.selectedRow >= rows.length) ui.selectedRow = rows.length - 1;
   if (ui.selectedRow < 0 && rows.length > 0) ui.selectedRow = 0;
@@ -3245,6 +3294,12 @@ function renderTable(art, rows, ui, tab) {
   table._virtFill = fill;
   table._virtRowCount = rows.length;
   table._virtSelectedRow = ui.selectedRow;
+  // Deep-link reveal: when set, mountVirtualTable scrolls the selected
+  // row into view even for an already-open (same) tab, overriding the
+  // usual scroll-position restore. One-shot: cleared here so a later
+  // re-render (row click, filter change) doesn't re-trigger it.
+  table._virtForceReveal = ui._forceReveal === true;
+  ui._forceReveal = false;
   return table;
 }
 
@@ -3267,13 +3322,18 @@ function mountVirtualTable(restoreScrollTop, restoreScrollTab, restoreScrollLeft
   const fill = table._virtFill;
   const tabKey = scroller.dataset.tabKey || null;
   const sameTab = restoreScrollTab != null && restoreScrollTab === tabKey;
+  // A deep-link ("open in <artifact>") sets _virtForceReveal so we
+  // scroll to the selected row even when this is the same tab being
+  // re-rendered. Without this, re-targeting an already-open tab would
+  // restore the old scroll offset and leave the selected row off screen.
+  const forceReveal = table._virtForceReveal === true;
 
   // First fill at the current scrollTop (0). This builds the spacer rows
   // sized for the FULL dataset, which establishes the real scrollable
   // height -- needed before we can set scrollTop accurately.
   fill(scroller);
 
-  if (sameTab && typeof restoreScrollTop === 'number') {
+  if (sameTab && !forceReveal && typeof restoreScrollTop === 'number') {
     // Re-render of the same table -- restore the exact viewport offset.
     // The spacers now exist so the browser won't wrongly clamp this.
     scroller.scrollTop = restoreScrollTop;
@@ -4546,12 +4606,170 @@ function renderHostOverview(hostId) {
         collectionCard,
         detectionsCard,
       ),
+      renderTriagePanel(host),
       artifactsSection,
     ),
   );
 }
 
-// hoSection builds one card with the standard head/body structure
+// renderTriagePanel builds the "Quick Hits" triage section for the host
+// overview. The data comes from GET /api/triage, which filters
+// already-parsed artifacts server-side. Because the overview renders
+// synchronously from cached host data, we render a container immediately
+// and fill it once the fetch resolves (or from cache on re-render).
+//
+// Groups are collapsible. Default state: expanded when the group has
+// findings, collapsed when it's a "none found" group -- so the analyst's
+// eye lands on the hits. The analyst's manual collapse/expand is tracked
+// in state.collapsedTriage and overrides the default.
+function renderTriagePanel(host) {
+  const container = $('section', { class: 'host-ov-triage', 'data-host': host.id });
+
+  const cached = state.triageCache[host.id];
+  if (cached) {
+    fillTriagePanel(container, host, cached);
+  } else {
+    // Loading placeholder; fetch then re-fill in place (no full render()
+    // needed -- we mutate this container's children directly).
+    container.appendChild($('div', { class: 'ho-section-head' },
+      $('span', { class: 'ho-section-title' }, 'Quick Hits'),
+      $('span', { class: 'ho-section-sub' }, 'scanning…'),
+    ));
+    api.triage(host.id).then(res => {
+      state.triageCache[host.id] = res;
+      // Only fill if this container is still in the DOM (the analyst may
+      // have navigated away during the fetch).
+      if (container.isConnected) {
+        container.innerHTML = '';
+        fillTriagePanel(container, host, res);
+      }
+    }).catch(err => {
+      if (container.isConnected) {
+        container.innerHTML = '';
+        container.appendChild($('div', { class: 'ho-section-head' },
+          $('span', { class: 'ho-section-title' }, 'Quick Hits'),
+        ));
+        container.appendChild($('div', { class: 'triage-error' },
+          `Couldn't load triage findings: ${err.message}`));
+      }
+    });
+  }
+  return container;
+}
+
+// fillTriagePanel renders the resolved triage result into the container.
+function fillTriagePanel(container, host, res) {
+  const groups = res.groups || [];
+  const totalFindings = groups.reduce((s, g) => s + ((g.findings || []).length), 0);
+  const hitGroups = groups.filter(g => (g.findings || []).length > 0).length;
+
+  // Section header with a summary line.
+  container.appendChild($('div', { class: 'ho-section-head' },
+    $('span', { class: 'ho-section-title' },
+      'Quick Hits ',
+      $('span', { class: 'triage-tag' }, 'triage sweep'),
+    ),
+    $('span', { class: 'ho-section-sub' },
+      totalFindings > 0
+        ? `${totalFindings} finding${totalFindings === 1 ? '' : 's'} across ${hitGroups} categor${hitGroups === 1 ? 'y' : 'ies'} · ${groups.length} checked`
+        : `nothing flagged · ${groups.length} categories checked`),
+  ));
+
+  // One collapsible block per group.
+  for (const g of groups) {
+    const findings = g.findings || [];
+    const hasFindings = findings.length > 0;
+    const collapseKey = `${host.id}|${g.id}`;
+    // Default collapsed for empty groups; expanded for groups with hits.
+    // The analyst's explicit toggle (tracked in collapsedTriage) wins.
+    const manualState = state.collapsedTriage.has(collapseKey);
+    const collapsed = state.collapsedTriage.has('explicit:' + collapseKey)
+      ? manualState
+      : !hasFindings;
+
+    const countBadge = hasFindings
+      ? $('span', { class: 'triage-count' }, String(findings.length))
+      : $('span', { class: 'triage-count zero' }, 'none');
+
+    const head = $('div', {
+      class: 'triage-group-h',
+      onclick: () => {
+        // Record an explicit toggle: flip the manual state and mark
+        // that the analyst has overridden the default for this group.
+        const newCollapsed = !collapsed;
+        if (newCollapsed) state.collapsedTriage.add(collapseKey);
+        else state.collapsedTriage.delete(collapseKey);
+        state.collapsedTriage.add('explicit:' + collapseKey);
+        render();
+      },
+    },
+      $('span', { class: 'triage-chev' }, collapsed ? '▸' : '▾'),
+      $('span', { class: 'triage-gico' }, g.icon || '·'),
+      $('span', { class: 'triage-gt' }, g.title),
+      countBadge,
+    );
+
+    const blockChildren = [head];
+
+    if (!collapsed) {
+      if (g.note) {
+        blockChildren.push($('div', { class: 'triage-note' }, g.note));
+      }
+      if (hasFindings) {
+        const body = $('div', { class: 'triage-group-body' },
+          ...findings.map(f => renderFinding(host, g, f)));
+        blockChildren.push(body);
+      } else {
+        blockChildren.push($('div', { class: 'triage-none' },
+          $('span', { class: 'triage-none-chk' }, '✓'),
+          noneFoundMessage(g.id)));
+      }
+    }
+
+    container.appendChild($('div', { class: 'triage-group' }, ...blockChildren));
+  }
+}
+
+// renderFinding is one row in a triage group. Clicking "open in
+// <artifact>" deep-links to the source row via the targetRowKey
+// mechanism (matched against r.__row in the artifact view).
+function renderFinding(host, group, f) {
+  const srcArt = (host.artifacts || []).find(a => a.id === f.sourceArtifact);
+  const artName = srcArt ? srcArt.name : f.sourceArtifact;
+  return $('div', { class: 'triage-finding' },
+    $('span', { class: 'triage-f-ts' }, f.timestamp || ''),
+    $('div', { class: 'triage-f-body' },
+      $('div', { class: 'triage-f-primary' }, f.primary || '(empty)'),
+      f.secondary && $('div', { class: 'triage-f-secondary' }, f.secondary),
+    ),
+    $('button', {
+      class: 'triage-f-open',
+      onclick: () => openTab({
+        kind: 'artifact',
+        hostId: host.id,
+        artifactId: f.sourceArtifact,
+        label: `${host.name} · ${artName}`,
+        targetRowKey: f.rowKey,
+      }),
+    }, `open in ${artName} →`),
+  );
+}
+
+// noneFoundMessage returns a per-group reassurance string for the empty
+// state, so "checked, clean" reads differently from "didn't check".
+function noneFoundMessage(groupId) {
+  switch (groupId) {
+    case 'run-keys':     return 'No Run / RunOnce autostart entries found.';
+    case 'winlogon':     return 'Shell / Userinit / Notify all default — nothing suspicious.';
+    case 'services':     return 'No services launching from unusual paths or via script interpreters.';
+    case 'sched-tasks':  return 'No scheduled-task registrations matched.';
+    case 'susp-amcache': return 'No Amcache executions from temp / download / profile paths.';
+    case 'susp-prefetch':return 'No prefetch entries referencing unusual locations.';
+    default:             return 'Nothing flagged.';
+  }
+}
+
+
 // matching the handoff's <Section> component. `right` is an optional
 // node (e.g. the "Open timeline →" link) shown on the right side of
 // the head; pass null to omit. `wide` makes the card span the full
@@ -4845,6 +5063,7 @@ function renderTimelineEvent(e, ui, scopeHostId) {
           onclick: () => openTab({
             kind: 'artifact', hostId: e.hostId, artifactId: e.artifactId,
             label: `${(host || {}).name || e.hostId} · ${e.artifactId}`,
+            targetRowKey: e.rowKey,
           }),
         }, e.artifactId),
         $('span', { class: 'grow' }),
@@ -4876,6 +5095,7 @@ function renderTimelineEvent(e, ui, scopeHostId) {
           onclick: () => openTab({
             kind: 'artifact', hostId: e.hostId, artifactId: e.artifactId,
             label: `${(host || {}).name || e.hostId} · ${e.artifactId}`,
+            targetRowKey: e.rowKey,
           }),
         }, '↗ Open in ' + e.artifactId),
       ),

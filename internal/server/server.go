@@ -22,6 +22,7 @@ import (
 	"github.com/example/artifact-review/internal/marks"
 	"github.com/example/artifact-review/internal/model"
 	"github.com/example/artifact-review/internal/preprocess"
+	"github.com/example/artifact-review/internal/triage"
 )
 
 // Server wires together the ingest store, mark store, jobs tracker,
@@ -57,6 +58,7 @@ func New(cases *ingest.Store, marks *marks.Store, jobsStore *jobs.Store, preproc
 //	GET  /api/browse?dir=        directory listing (dirs only) for UI browser
 //	GET  /api/artifact-types     registry of known artifact types
 //	GET  /api/artifact?h&a       full artifact rows for a host
+//	GET  /api/triage?host=       quick-hit triage findings for a host
 //	GET  /api/marks?host=        list marks (optionally scoped to a host)
 //	POST /api/marks              upsert a mark (body: full Mark JSON)
 //	DEL  /api/marks/{id}         delete a mark
@@ -77,6 +79,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/browse", s.handleBrowse)
 	mux.HandleFunc("/api/artifact-types", s.handleArtifactTypes)
 	mux.HandleFunc("/api/artifact", s.handleArtifact)
+	mux.HandleFunc("/api/triage", s.handleTriage)
 	mux.HandleFunc("/api/marks", s.handleMarks)
 	mux.HandleFunc("/api/marks/", s.handleMarkByID)
 	mux.HandleFunc("/api/upload", s.handleUpload)
@@ -441,6 +444,43 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, art)
+}
+
+// handleTriage computes the "quick hits" triage panel for a host by
+// filtering already-parsed artifacts (registry / amcache / prefetch).
+// It loads each contributing artifact best-effort: a host missing any
+// of them just yields empty groups for that source, not an error.
+//
+//	GET /api/triage?host=<id>  -> triage.Result JSON
+func (s *Server) handleTriage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		writeErr(w, http.StatusBadRequest, "host query param required")
+		return
+	}
+
+	// loadRows returns the parsed rows for an artifact, or nil if the
+	// host doesn't have that artifact (which is normal -- not every
+	// triage collection includes every source).
+	loadRows := func(artID string) []model.Row {
+		art, err := s.cases.LoadArtifact(host, artID)
+		if err != nil || art == nil {
+			return nil
+		}
+		return art.Rows
+	}
+
+	arts := triage.Artifacts{
+		Registry: loadRows("registry"),
+		Amcache:  loadRows("amcache"),
+		Prefetch: loadRows("prefetch"),
+	}
+	result := triage.Analyze(host, arts)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleMarks(w http.ResponseWriter, r *http.Request) {

@@ -256,6 +256,107 @@ at /handoff-overview/. Same cards, new structure and styling.
 - Local Users table (no source data yet; the .wide Section pattern
   is in place for when users data lands)
 
+## v0.15.1 — GitHub Pages site (SHIPPED)
+
+Public-facing landing page + interactive demo, served from `/docs`
+on the default branch.
+
+**Done:**
+- [x] `docs/index.html` — landing page (hero + features grid +
+  artifact list grouped by category + install/run snippets).
+  Velociraptor cyan theme.
+- [x] `docs/demo.html` — self-contained interactive UI walkthrough
+  with full app chrome (brand bar, sidebar, top tab strip, status
+  bar) in Yaru Dark. Four primary tabs (Overview / Timeline /
+  Event Logs / Hayabusa) + a 5th Pivot tab opening dynamically
+  when a Row Detail time-window button is clicked.
+- [x] `docs/.nojekyll` so Pages serves the HTML as-is.
+- [x] `docs/README.md` notes for maintainers (keep CSS variables
+  in sync with the real app's themes.css / extras.css).
+
+## v0.16.0 — Triage panel + deep-link fix (SHIPPED)
+
+Two pieces that landed together: a "Quick Hits" triage sweep on
+the Host Overview that surfaces low-hanging-fruit findings from
+already-parsed artifacts, and a general fix for the app-wide bug
+where "open in <artifact>" links navigated to the right artifact
+but failed to target the specific row.
+
+**Quick Hits triage panel (server-side):**
+- [x] New `internal/triage` package with pure-function filters over
+  `[]model.Row` — testable in isolation, no I/O. Categories
+  shipped: Run / RunOnce keys, Winlogon autostart, suspicious
+  services (filtered to suspicious-path / launcher heuristic),
+  scheduled tasks, suspicious-path Amcache entries, suspicious-
+  path Prefetch entries.
+- [x] Filter on deterministic `KeyPath` substrings, not RECmd's
+  `Category` column (which varies by batch file). Robust against
+  Kroll_Batch.reb vs other batches.
+- [x] Services group is opinionated (signal > completeness): only
+  services whose ImagePath/ValueData lives in `\Temp\`, `\Users\`,
+  `\ProgramData\` etc., OR references `cmd.exe` / `powershell` /
+  `rundll32` / `.bat` / `.ps1` / `-enc` and similar launchers.
+  Documented blind spot: a malicious service in System32 with a
+  normal-looking path won't flag here — pinned in
+  `TestServices_KnownFalseNegative`.
+- [x] `GET /api/triage?host=<id>` handler; loads registry/amcache/
+  prefetch best-effort (nil-tolerant) and returns grouped findings.
+- [x] Each finding carries the source row's `__row` index so the UI
+  can deep-link back to the exact row.
+
+**Quick Hits triage panel (frontend):**
+- [x] `renderTriagePanel` on the host overview, between the briefing
+  cards and the artifact tiles. Collapsible groups; expanded by
+  default when there are findings, collapsed when "none found".
+  The analyst's manual toggle overrides the default and persists
+  for the session.
+- [x] Empty groups render a per-category "none found" message
+  (e.g. "Shell / Userinit / Notify all default") so "checked,
+  clean" is visually distinct from "didn't check".
+- [x] Triage result cached per host in `state.triageCache` so
+  re-renders don't refetch.
+- [x] Every finding has an "open in <Artifact> →" link that
+  navigates to the source artifact AND scrolls the exact row
+  into view (see deep-link fix below).
+
+**App-wide deep-link fix:**
+- [x] Tab objects now carry `targetRowKey`. The artifact view's
+  row-resolution step matches first on `rowKeyOf(r)` (the content
+  hash used by marks / pivots / timeline) and falls back to
+  matching `r.__row` directly (used by triage, which has the raw
+  index on hand and shouldn't have to duplicate the JS hashing in
+  Go).
+- [x] One-shot `_forceReveal` flag on `ui` forces
+  `mountVirtualTable` to scroll the selected row into view even
+  when the tab was already open — fixes the case where clicking
+  "open in" with the artifact tab already open used to be a
+  silent no-op.
+- [x] `openTab` dedup branch carries the deep-link target onto an
+  already-open tab so re-targeting works.
+- [x] If the target row exists in the artifact but is hidden by an
+  active filter (severity chips, "Marked only", MPLog default
+  filter), surface a toast: "Row is hidden by an active filter —
+  clear filters to see it" rather than silently selecting the
+  wrong row.
+- [x] Wired existing timeline "Open in <artifact>" + artifact-chip
+  links to pass `targetRowKey: e.rowKey` — fixes the bug in place
+  for the pre-existing callers.
+
+**CSS cleanup:**
+- [x] `--mono` variable defined once in `themes.css`'s theme-
+  invariant `:root` (separate from per-theme palette blocks since
+  the mono font stack doesn't vary by theme). All 28 inline
+  `'JetBrains Mono'`-family declarations across `app.css` and
+  `extras.css` consolidated to `var(--mono)`. Single source of
+  truth.
+
+**Not in this release (deferred):**
+- Tier-2 triage items (PowerShell encoded-command detection,
+  recently-created executables in user-writable paths from MFT,
+  WMI persistence). Will land as v0.17.0 if there's appetite.
+- Per-host Triage panel collapse state persistence across page
+  reloads (currently session-scoped via `state.collapsedTriage`).
+
 ### Phase 3 host overview — Per-host targeted re-preprocessing
 
 Re-runs `Run-ZimmermanTools.ps1` against an existing host's image

@@ -45,7 +45,7 @@
   border-radius: 2px;
   padding: 8px 12px;
   color: var(--fg);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
   font-size: 12px;
   outline: none;
 }
@@ -56,7 +56,7 @@
   font-size: 11px;
   color: var(--fg-faint);
   margin-top: 10px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
 }
 
 /* host overview wrapper around .host-overview KPIs */
@@ -386,7 +386,7 @@
   background: var(--bg-1);
   border: 1px solid var(--border-soft);
   border-radius: 2px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--fg-2);
 }
@@ -417,7 +417,7 @@
 .fb-hint {
   font-size: 11px;
   color: var(--accent);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
 }
 .fb-loading, .fb-empty {
   padding: 18px 12px;
@@ -461,7 +461,7 @@
 }
 .fb-row .fb-path {
   color: var(--fg-faint);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
   font-size: 10.5px;
   margin-left: auto;
   white-space: nowrap;
@@ -470,7 +470,7 @@
   max-width: 60%;
 }
 .modal-foot .fb-current {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--fg-3);
   flex: 1;
@@ -564,7 +564,7 @@
   border-radius: 2px;
   padding: 8px 12px;
   color: var(--fg);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
   font-size: 12px;
   outline: none;
   margin-bottom: 14px;
@@ -597,7 +597,7 @@
   font-size: 12px;
   color: var(--fg-2);
   cursor: pointer;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--mono);
 }
 .recent-row:hover {
   background: var(--accent-soft);
@@ -856,7 +856,7 @@ body.drawer-resizing * {
   padding: 3px 7px;
   color: var(--fg);
   font-size: 11px;
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   outline: none;
   box-sizing: border-box;
   font-weight: normal;
@@ -960,7 +960,7 @@ body.drawer-resizing * {
   flex-shrink: 0;
 }
 .pivot-btn-val {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   color: var(--fg-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -968,12 +968,12 @@ body.drawer-resizing * {
   max-width: 220px;
 }
 .pivot-btn.time-btn {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
 }
 .pivot-anchor-hint {
   font-size: 10.5px;
   color: var(--fg-3);
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   padding: 2px 0;
 }
 .pivot-loading {
@@ -1011,7 +1011,7 @@ body.drawer-resizing * {
   border-radius: 2px;
 }
 .pivot-result-needle {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   color: var(--fg-2);
   font-weight: 600;
 }
@@ -1052,7 +1052,7 @@ body.drawer-resizing * {
   border-bottom: 0;
 }
 .pivot-row-when {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   color: var(--fg-3);
   flex-shrink: 0;
   min-width: 150px;
@@ -1094,7 +1094,7 @@ body.drawer-resizing * {
   flex-shrink: 0;
 }
 .pivot-chip-v {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   color: var(--fg-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1121,7 +1121,7 @@ body.drawer-resizing * {
   color: var(--fg-2);
 }
 .corr-window {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   color: var(--accent);
   margin-left: 4px;
 }
@@ -1156,12 +1156,12 @@ body.drawer-resizing * {
   background: var(--accent-soft);
 }
 .corr-when {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   color: var(--fg-3);
   white-space: nowrap;
 }
 .corr-delta {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   color: var(--accent);
   text-align: right;
 }
@@ -1637,8 +1637,6 @@ body.drawer-resizing * {
    Adapted from /handoff-overview/overview.css. Class names preserved
    verbatim so a future redesign drop-in stays mechanical. Local
    adaptations:
-     - Uses var(--mono) replaced inline since Douglas has no --mono
-       token; the explicit family stack is retained.
      - .ho-section-ico shows an emoji (Douglas's icon convention)
        rather than an inline SVG; the parent's accent color still
        reaches it via color since emoji ignore color but the surround
@@ -1686,7 +1684,7 @@ body.drawer-resizing * {
   font-size: 22px; font-weight: 700; color: var(--fg);
   letter-spacing: -0.2px;
   margin: 0;
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1700,10 +1698,10 @@ body.drawer-resizing * {
 }
 .ho-fqdn .ho-fqdn-host {
   color: var(--fg-2);
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
 }
 .ho-fqdn .ho-sep { color: var(--fg-faint); margin: 0 6px; }
-.ho-fqdn .mono { font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace; }
+.ho-fqdn .mono { font-family: var(--mono); }
 
 .ho-status {
   display: flex; gap: 8px; flex-wrap: wrap;
@@ -1784,7 +1782,7 @@ body.drawer-resizing * {
 .ho-kv-k { color: var(--fg-3); }
 .ho-kv-v { color: var(--fg); min-width: 0; word-break: break-word; }
 .ho-kv-v.mono, .host-ov-scroll .mono {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', 'SF Mono', monospace;
+  font-family: var(--mono);
   font-size: 11.5px;
 }
 
@@ -1884,3 +1882,101 @@ body.drawer-resizing * {
 }
 .ho-art-alerts { font-size: 10px; color: var(--crit); font-weight: 600; }
 .ho-art-rows   { font-size: 10px; color: var(--fg-3); }
+
+/* ============================================================
+   Quick Hits triage panel (host overview).
+   Collapsible groups of low-hanging-fruit findings derived
+   server-side from /api/triage. Uses theme variables so it
+   renders correctly under every theme.
+   ============================================================ */
+.host-ov-triage { padding: 0 14px 6px; }
+.triage-tag {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+  background: var(--accent-soft); color: var(--accent);
+  padding: 1px 7px; border-radius: 2px; margin-left: 8px;
+  font-weight: 700; vertical-align: middle;
+}
+.triage-error {
+  font-size: 11.5px; color: var(--crit);
+  padding: 8px 2px;
+}
+.triage-group {
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.triage-group-h {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 13px;
+  background: var(--bg-1);
+  cursor: pointer;
+  user-select: none;
+}
+.triage-group-h:hover { background: var(--bg-3); }
+.triage-chev {
+  color: var(--fg-3); font-size: 11px; width: 10px;
+  flex-shrink: 0;
+}
+.triage-gico { font-size: 14px; flex-shrink: 0; }
+.triage-gt {
+  font-size: 12px; font-weight: 600; color: var(--fg);
+  flex: 1;
+}
+.triage-count {
+  font-family: var(--mono);
+  font-size: 11px; color: var(--fg-2);
+  background: var(--bg-3);
+  padding: 1px 9px; border-radius: 9px;
+  flex-shrink: 0;
+}
+.triage-count.zero {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+}
+.triage-note {
+  padding: 7px 13px 0 32px;
+  font-size: 10.5px; color: var(--fg-3); font-style: italic;
+}
+.triage-group-body { padding: 4px 0 6px; }
+.triage-finding {
+  display: grid;
+  grid-template-columns: 150px 1fr auto;
+  gap: 14px; align-items: baseline;
+  padding: 7px 14px 7px 32px;
+  border-top: 1px solid var(--border-soft);
+}
+.triage-group-body .triage-finding:first-child { border-top: 0; }
+.triage-finding:hover { background: var(--bg-row-hov, var(--bg-3)); }
+.triage-f-ts {
+  font-family: var(--mono);
+  font-size: 10.5px; color: var(--fg-3);
+  white-space: nowrap;
+}
+.triage-f-body { min-width: 0; }
+.triage-f-primary {
+  font-family: var(--mono);
+  font-size: 12px; color: var(--fg);
+  word-break: break-all;
+}
+.triage-f-secondary {
+  font-size: 10.5px; color: var(--fg-3);
+  margin-top: 2px;
+  font-family: var(--mono);
+  word-break: break-all;
+}
+.triage-f-open {
+  color: var(--accent); font-size: 11px;
+  white-space: nowrap; cursor: pointer;
+  background: transparent; border: 0;
+  font-family: inherit;
+  align-self: center;
+}
+.triage-f-open:hover { text-decoration: underline; }
+.triage-none {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px 9px 32px;
+  font-size: 11.5px; color: var(--ok);
+}
+.triage-none-chk { font-size: 13px; flex-shrink: 0; }

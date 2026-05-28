@@ -4,6 +4,13 @@
    Swap with [data-theme="..."] on <html>.
    ---------------------------------------------------------- */
 
+/* Theme-invariant tokens. Sit on :root only (no per-theme override)
+   because they're shape/layout/typography, not palette. Anything that
+   should vary by theme belongs in the theme blocks below. */
+:root {
+  --mono: 'JetBrains Mono', 'Ubuntu Mono', 'SF Mono', Menlo, Consolas, monospace;
+}
+
 :root,
 [data-theme="yaru-dark"] {
   --bg:           #1e1e1e;        /* canvas */

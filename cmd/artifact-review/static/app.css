@@ -15,7 +15,7 @@ html, body, #root {
   text-rendering: optimizeLegibility;
 }
 button { font-family: inherit; }
-.mono { font-family: 'JetBrains Mono', 'Ubuntu Mono', 'SF Mono', Menlo, Consolas, monospace; }
+.mono { font-family: var(--mono); }
 
 /* ------------ window shell ------------ */
 .window {
@@ -508,7 +508,7 @@ table.artifact-table {
 }
 .artifact-table tbody tr.virt-spacer:hover td { background: transparent; }
 .artifact-table .num { text-align: right; }
-.artifact-table .mono-cell { font-family: 'JetBrains Mono', 'Ubuntu Mono', 'SF Mono', Menlo, Consolas, monospace; font-size: 11.5px; }
+.artifact-table .mono-cell { font-family: var(--mono); font-size: 11.5px; }
 
 .sev-pill {
   display: inline-flex; align-items: center; gap: 4px;
@@ -555,7 +555,7 @@ table.artifact-table {
   color: var(--accent);
   text-transform: none;
   letter-spacing: 0;
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   font-size: 11px;
   background: var(--accent-soft);
   padding: 2px 7px;
@@ -587,7 +587,7 @@ table.artifact-table {
 .kv-grid dd {
   margin: 0;
   color: var(--fg);
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   font-size: 11.5px;
   word-break: break-word;
   padding: 2px 0;
@@ -608,7 +608,7 @@ table.artifact-table {
 }
 .tl-item .when {
   color: var(--fg-3);
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   font-size: 10.5px;
 }
 .tl-item .what {
@@ -785,7 +785,7 @@ table.artifact-table {
   margin-bottom: 18px;
 }
 .tl-date {
-  font-family: 'JetBrains Mono', 'Ubuntu Mono', monospace;
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--fg-3);
   text-transform: uppercase;
