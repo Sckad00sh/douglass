@@ -1,7 +1,7 @@
 # --- Go build artifacts ---
 # The Windows binary we ship; never check in builds.
-artifact-review
-artifact-review.exe
+/artifact-review
+/artifact-review.exe
 *.exe
 *.test
 *.out
