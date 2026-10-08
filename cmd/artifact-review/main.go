@@ -69,6 +69,25 @@ func main() {
 	} else {
 		log.Printf("preprocessor ready: %s", prep.PSPath())
 		defer prep.Close()
+		// Elevation self-check. The preprocessor spawns RECmd + reg.exe
+		// against (often mounted) image hives, which need administrator
+		// rights. A child process inherits the parent's token, so if
+		// Douglas isn't elevated, neither is the preprocessor -- and the
+		// failure is silent (fallback hostname, empty identity/network,
+		// no RECmd_Batch.csv). Announce the state up front so it's not a
+		// mystery later.
+		if elevated, ok := isElevated(); ok && !elevated {
+			log.Printf("============================================================")
+			log.Printf("WARNING: Douglas is NOT running as Administrator.")
+			log.Printf("Preprocessing needs admin rights to read protected hive")
+			log.Printf("files. Without them RECmd finds 0 hives and host identity")
+			log.Printf("(hostname / time zone / network) cannot be read.")
+			log.Printf("Fix: close Douglas, right-click douglass.exe, and choose")
+			log.Printf("'Run as administrator' (accept the UAC prompt).")
+			log.Printf("============================================================")
+		} else if ok && elevated {
+			log.Printf("running elevated (administrator): preprocessing can read protected hives")
+		}
 	}
 
 	if *caseDir != "" {

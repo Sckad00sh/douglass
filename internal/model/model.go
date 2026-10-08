@@ -185,8 +185,15 @@ type ArtifactSummary struct {
 	Category   string `json:"category"`
 	Tool       string `json:"tool"`
 	SourceFile string `json:"sourceFile"`
-	RowCount   int    `json:"rowCount"`
-	AlertCount int    `json:"alertCount"`
+	// ExtraSources holds additional source files when more than one file
+	// on disk maps to the same artifact ID -- e.g. SBECmd emits one CSV
+	// per user (Alice_UsrClass.csv, Bob_UsrClass.csv), all "shellbags".
+	// SourceFile is the first; ExtraSources are the rest. LoadArtifact
+	// concatenates all of them so the artifact view shows every user's
+	// rows in one table. Empty/omitted for the common single-file case.
+	ExtraSources []string `json:"extraSources,omitempty"`
+	RowCount     int      `json:"rowCount"`
+	AlertCount   int      `json:"alertCount"`
 	// SeverityCounts is the per-severity row breakdown for artifacts
 	// that surface severity (Hayabusa, MPLog). Keys are canonical
 	// labels: "critical", "high", "medium", "low", "info". Artifacts

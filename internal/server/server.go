@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -199,6 +200,30 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// parseStepMarker parses the payload of a DOUGLAS_STEP=<n>/<total>|<name>
+// marker (the part after the "="). Returns ok=false if the shape is
+// unexpected, in which case the caller ignores it (a malformed marker
+// shouldn't break progress display).
+func parseStepMarker(payload string) (num, total int, name string, ok bool) {
+	// payload looks like "5/11|RECmd"
+	bar := strings.IndexByte(payload, '|')
+	if bar < 0 {
+		return 0, 0, "", false
+	}
+	frac := payload[:bar]
+	name = payload[bar+1:]
+	slash := strings.IndexByte(frac, '/')
+	if slash < 0 {
+		return 0, 0, "", false
+	}
+	n, err1 := strconv.Atoi(strings.TrimSpace(frac[:slash]))
+	t, err2 := strconv.Atoi(strings.TrimSpace(frac[slash+1:]))
+	if err1 != nil || err2 != nil {
+		return 0, 0, "", false
+	}
+	return n, t, strings.TrimSpace(name), true
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -946,6 +971,40 @@ func (s *Server) handlePreprocess(w http.ResponseWriter, r *http.Request) {
 					logMu.Unlock()
 					return
 				}
+				// Step marker: DOUGLAS_STEP=<n>/<total>|<name>. Update the
+				// structured step fields and don't echo to the log (the
+				// human-readable "Write-Step" line for the tool follows
+				// separately). This drives the progress bar's "n/total"
+				// and the current-tool label.
+				if strings.HasPrefix(trimmed, "DOUGLAS_STEP=") {
+					payload := strings.TrimPrefix(trimmed, "DOUGLAS_STEP=")
+					if num, total, name, ok := parseStepMarker(payload); ok {
+						s.jobs.SetStep(j.ID, num, total, name)
+					}
+					return
+				}
+				// Tool heartbeat: DOUGLAS_TOOL|<line>. Raw output from the
+				// running tool, emitted so we can prove liveness. We bump
+				// the activity timer and remember the latest line as a
+				// transient "current activity" string -- but we do NOT
+				// append it to the scrolling progress buffer. That buffer
+				// is reserved for the clean step/status lines; flooding it
+				// with raw tool output is exactly the firehose we're
+				// removing. The full raw output lives in run-zimmerman.log
+				// for troubleshooting.
+				if strings.HasPrefix(trimmed, "DOUGLAS_TOOL|") {
+					s.jobs.TouchActivity(j.ID)
+					return
+				}
+				// Any other line is the script's own Write-Host status
+				// output (step/ok/skip/FAIL, section headers). Write-Host is
+				// captured into this stream directly, so it needs no marker.
+				// It's clean status worth showing in the browser panel, and
+				// it also serves as an activity signal.
+				s.jobs.TouchActivity(j.ID)
+				// Everything else (the script's own Write-Host status lines
+				// that reach stdout, plus markers already handled above) is
+				// clean status worth showing in the browser panel.
 				logMu.Lock()
 				logBuf.WriteString(line)
 				logBuf.WriteByte('\n')
@@ -966,7 +1025,25 @@ func (s *Server) handlePreprocess(w http.ResponseWriter, r *http.Request) {
 				return "", runErr
 			}
 			if exitCode != 0 {
-				return "", fmt.Errorf("preprocessor exited with code %d", exitCode)
+				// Surface the tail of the captured output, not just the
+				// bare code -- a PowerShell terminating error (the usual
+				// cause of a non-zero exit) prints its message to the
+				// stream just before exit, so the last few lines are where
+				// the actual cause lives. Without this the analyst sees
+				// only "exited with code N" and can't tell what failed.
+				logMu.Lock()
+				tail := logBuf.String()
+				logMu.Unlock()
+				tail = strings.TrimSpace(tail)
+				if tail != "" {
+					// Keep the last ~1.5KB so the error card stays readable
+					// but carries the real message.
+					if len(tail) > 1500 {
+						tail = "…" + tail[len(tail)-1500:]
+					}
+					return "", fmt.Errorf("preprocessor exited with code %d:\n%s", exitCode, tail)
+				}
+				return "", fmt.Errorf("preprocessor exited with code %d (no output captured)", exitCode)
 			}
 			// Pick the path to open: the marker if the PS1 emitted it,
 			// otherwise fall back to OutputRoot. The fallback covers

@@ -138,9 +138,110 @@ func TestSuspPrefetch(t *testing.T) {
 	}
 }
 
-// TestAnalyze_EndToEnd runs the whole pipeline and checks the result
-// shape: 6 groups always present, total findings correct, NonEmptyGroups
-// filtering working.
+// wantGroupCount is the number of groups Analyze always emits, empty or
+// not. Bump this when a group is added/removed in Analyze.
+const wantGroupCount = 11
+
+// TestAppInitDlls flags non-empty AppInit_DLLs and skips the benign
+// empty default.
+func TestAppInitDlls(t *testing.T) {
+	reg := []model.Row{
+		row(map[string]string{"__row": "0", "KeyPath": `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows`, "ValueName": "AppInit_DLLs", "ValueData": `C:\ProgramData\evil.dll`}),
+		row(map[string]string{"__row": "1", "KeyPath": `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows`, "ValueName": "AppInit_DLLs", "ValueData": ``}),
+		row(map[string]string{"__row": "2", "KeyPath": `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\AppCertDlls`, "ValueName": "x", "ValueData": `C:\Temp\hook.dll`}),
+	}
+	g := appInitDllsGroup(reg)
+	if len(g.Findings) != 2 {
+		t.Fatalf("expected 2 findings (non-empty AppInit + AppCert), got %d", len(g.Findings))
+	}
+	for _, f := range g.Findings {
+		if f.Primary == "(empty)" {
+			t.Error("empty AppInit_DLLs default leaked in")
+		}
+	}
+}
+
+// TestIFEO flags a Debugger value and ignores benign IFEO tuning values.
+func TestIFEO(t *testing.T) {
+	reg := []model.Row{
+		row(map[string]string{"__row": "0", "KeyPath": `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe`, "ValueName": "Debugger", "ValueData": `C:\Windows\System32\cmd.exe`}),
+		row(map[string]string{"__row": "1", "KeyPath": `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe`, "ValueName": "DisableExceptionChainValidation", "ValueData": "1"}),
+		row(map[string]string{"__row": "2", "KeyPath": `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit\malware.exe`, "ValueName": "MonitorProcess", "ValueData": `C:\Temp\persist.exe`}),
+	}
+	g := ifeoGroup(reg)
+	if len(g.Findings) != 2 {
+		t.Fatalf("expected 2 findings (Debugger + MonitorProcess), got %d", len(g.Findings))
+	}
+	for _, f := range g.Findings {
+		if f.Secondary == `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe → DisableExceptionChainValidation` {
+			t.Error("benign IFEO tuning value leaked in")
+		}
+	}
+}
+
+// TestLSAPackages flags Security/Authentication Packages.
+func TestLSAPackages(t *testing.T) {
+	reg := []model.Row{
+		row(map[string]string{"__row": "0", "KeyPath": `HKLM\SYSTEM\CurrentControlSet\Control\Lsa`, "ValueName": "Security Packages", "ValueData": `kerberos, msv1_0, evilssp`}),
+		row(map[string]string{"__row": "1", "KeyPath": `HKLM\SYSTEM\CurrentControlSet\Control\Lsa`, "ValueName": "Authentication Packages", "ValueData": `msv1_0`}),
+		row(map[string]string{"__row": "2", "KeyPath": `HKLM\SYSTEM\CurrentControlSet\Control\Lsa`, "ValueName": "auditbasedirectories", "ValueData": "0"}),
+	}
+	g := lsaPackagesGroup(reg)
+	if len(g.Findings) != 2 {
+		t.Fatalf("expected 2 findings (Security + Authentication Packages), got %d", len(g.Findings))
+	}
+}
+
+// TestDefenderTamper flags enabled disable-toggles and exclusions, skips
+// a disable-toggle set to 0.
+func TestDefenderTamper(t *testing.T) {
+	reg := []model.Row{
+		row(map[string]string{"__row": "0", "KeyPath": `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender`, "ValueName": "DisableAntiSpyware", "ValueData": "1"}),
+		row(map[string]string{"__row": "1", "KeyPath": `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection`, "ValueName": "DisableRealtimeMonitoring", "ValueData": "0"}),
+		row(map[string]string{"__row": "2", "KeyPath": `HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths`, "ValueName": `C:\ProgramData\Update`, "ValueData": "0"}),
+	}
+	g := defenderTamperGroup(reg)
+	if len(g.Findings) != 2 {
+		t.Fatalf("expected 2 findings (DisableAntiSpyware=1 + exclusion), got %d", len(g.Findings))
+	}
+	for _, f := range g.Findings {
+		if f.Secondary == `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection → DisableRealtimeMonitoring` {
+			t.Error("DisableRealtimeMonitoring=0 (not actually disabled) leaked in")
+		}
+	}
+	// The exclusion finding should surface the excluded path (value name).
+	foundExclusion := false
+	for _, f := range g.Findings {
+		if f.Primary == `C:\ProgramData\Update` {
+			foundExclusion = true
+		}
+	}
+	if !foundExclusion {
+		t.Error("exclusion path not surfaced as primary")
+	}
+}
+
+// TestCOMHijack filters CLSID servers to suspicious paths only.
+func TestCOMHijack(t *testing.T) {
+	reg := []model.Row{
+		row(map[string]string{"__row": "0", "KeyPath": `HKCU\Software\Classes\CLSID\{ABCD-1234}\InprocServer32`, "ValueName": "(default)", "ValueData": `C:\Users\jbeck\AppData\Roaming\hijack.dll`}),
+		row(map[string]string{"__row": "1", "KeyPath": `HKLM\SOFTWARE\Classes\CLSID\{EFGH-5678}\InprocServer32`, "ValueName": "(default)", "ValueData": `C:\Windows\System32\shell32.dll`}),
+		row(map[string]string{"__row": "2", "KeyPath": `HKLM\SOFTWARE\Classes\CLSID\{IJKL-9012}\LocalServer32`, "ValueName": "(default)", "ValueData": `powershell.exe -nop -w hidden`}),
+	}
+	g := comHijackGroup(reg)
+	if len(g.Findings) != 2 {
+		t.Fatalf("expected 2 suspicious COM servers, got %d", len(g.Findings))
+	}
+	for _, f := range g.Findings {
+		if f.Primary == `C:\Windows\System32\shell32.dll` {
+			t.Error("legitimate System32 COM server leaked in")
+		}
+	}
+}
+
+
+// shape: all groups always present, total findings correct,
+// NonEmptyGroups filtering working.
 func TestAnalyze_EndToEnd(t *testing.T) {
 	arts := Artifacts{
 		Registry: []model.Row{
@@ -156,8 +257,8 @@ func TestAnalyze_EndToEnd(t *testing.T) {
 	if res.Host != "WS-TEST" {
 		t.Errorf("host not echoed: %q", res.Host)
 	}
-	if len(res.Groups) != 6 {
-		t.Fatalf("expected 6 groups always, got %d", len(res.Groups))
+	if len(res.Groups) != wantGroupCount {
+		t.Fatalf("expected %d groups always, got %d", wantGroupCount, len(res.Groups))
 	}
 	if res.TotalFindings() != 3 {
 		t.Errorf("expected 3 total findings, got %d", res.TotalFindings())
@@ -168,12 +269,12 @@ func TestAnalyze_EndToEnd(t *testing.T) {
 	}
 }
 
-// TestAnalyze_EmptyInput ensures nil/empty artifacts produce 6 empty
+// TestAnalyze_EmptyInput ensures nil/empty artifacts produce empty
 // groups, not a crash.
 func TestAnalyze_EmptyInput(t *testing.T) {
 	res := Analyze("WS-EMPTY", Artifacts{})
-	if len(res.Groups) != 6 {
-		t.Fatalf("expected 6 groups even when empty, got %d", len(res.Groups))
+	if len(res.Groups) != wantGroupCount {
+		t.Fatalf("expected %d groups even when empty, got %d", wantGroupCount, len(res.Groups))
 	}
 	if res.TotalFindings() != 0 {
 		t.Errorf("expected 0 findings, got %d", res.TotalFindings())

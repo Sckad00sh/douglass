@@ -1384,6 +1384,53 @@ body.drawer-resizing * {
   color: var(--fg-3);
   font-size: 11px;
 }
+
+/* Step-aware preprocess progress bar. The fill width reflects
+   "tools started / total" (honest, not a fabricated overall %). A
+   shimmer overlay animates while output is flowing; it stops and the
+   bar turns amber when the job stalls (no output for a while). */
+.job-bar {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+  margin: 6px 0 4px;
+}
+.job-bar-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.job-bar-shimmer {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 45%, transparent) 50%,
+    transparent 100%);
+  transform: translateX(-100%);
+  animation: jobShimmer 1.3s linear infinite;
+}
+@keyframes jobShimmer {
+  to { transform: translateX(100%); }
+}
+/* When stalled: freeze the shimmer and tint the bar amber so a hung
+   run is visually distinct from an actively-working one. */
+.job-bar.stalled .job-bar-shimmer { animation: none; opacity: 0; }
+.job-bar.stalled .job-bar-fill {
+  background: var(--sev-medium, #c79a3a);
+}
+.job-step {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 10.5px; color: var(--fg-3);
+  margin-bottom: 2px;
+}
+.job-step-name { font-weight: 600; color: var(--fg-2); }
+.job-step-stall { white-space: nowrap; }
+.job-step-stall.warn { color: var(--sev-medium, #c79a3a); font-weight: 600; }
+
 .job-err {
   color: var(--sev-high, #b65a5a);
   font-size: 11px;

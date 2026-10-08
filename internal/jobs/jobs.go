@@ -66,6 +66,16 @@ type Job struct {
 	FileName   string     `json:"fileName"`   // analyst-supplied (sanitized for display)
 	ToolName   string     `json:"toolName"`   // empty for upload kind
 	Progress   string     `json:"progress"`   // free-form status line (e.g. "uploading 412/842 MB")
+	// Structured preprocessor progress, parsed from the PS1's
+	// DOUGLAS_STEP= markers. StepTotal is the count of tools that will
+	// run; StepNum is how many have started; StepName is the current
+	// tool. LastLineAt is updated on every line of tool output so the
+	// UI can show a stall timer ("no activity for Ns"). All zero/empty
+	// for non-preprocess jobs (uploads).
+	StepNum    int        `json:"stepNum,omitempty"`
+	StepTotal  int        `json:"stepTotal,omitempty"`
+	StepName   string     `json:"stepName,omitempty"`
+	LastLineAt *time.Time `json:"lastLineAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ResultID   string     `json:"resultId,omitempty"` // artifact ID when complete
 	StartedAt  time.Time  `json:"startedAt"`
@@ -245,6 +255,33 @@ func (s *Store) SetProgress(id, progress string) {
 	defer s.mu.Unlock()
 	if j, ok := s.jobs[id]; ok {
 		j.Progress = progress
+	}
+}
+
+// SetStep updates a job's structured step fields (current tool, step
+// number, total) and refreshes the activity timestamp. Called when the
+// server parses a DOUGLAS_STEP= marker from the preprocessor stream.
+func (s *Store) SetStep(id string, num, total int, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if j, ok := s.jobs[id]; ok {
+		j.StepNum = num
+		j.StepTotal = total
+		j.StepName = name
+		now := time.Now()
+		j.LastLineAt = &now
+	}
+}
+
+// TouchActivity bumps a job's LastLineAt to now. Called on every line of
+// tool output so the UI's stall timer ("no activity for Ns") resets
+// whenever the preprocessor is actively producing output.
+func (s *Store) TouchActivity(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if j, ok := s.jobs[id]; ok {
+		now := time.Now()
+		j.LastLineAt = &now
 	}
 }
 

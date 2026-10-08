@@ -38,6 +38,16 @@ Things to tackle next, roughly ordered by impact.
   (`~/.config/douglas/profile.json` elsewhere). Flat list, no
   bundles. Picked up when there's real workflow demand.
 
+- [ ] **Export marked rows / findings to CSV** (not yet built). When
+  this lands, **escape CSV formula injection**: any field whose first
+  char is `=`, `+`, `-`, `@`, tab, or CR must be prefixed (e.g. with a
+  leading `'`) before writing. Artifact data comes from compromised
+  hosts, so a field like `=cmd|'/c calc'!A1` would execute when the
+  analyst opens the export in Excel. Douglas itself is safe (it renders
+  as text, never evaluates), but an export hands the data to a
+  spreadsheet that does. Flagged in the v0.17.0 security audit as the
+  one forward-looking item; no code until export exists.
+
 ## MPLog follow-ups
 
 The MPLog parser ships in v0.10.5 covering the patterns we saw in a real
@@ -356,6 +366,89 @@ but failed to target the specific row.
   WMI persistence). Will land as v0.17.0 if there's appetite.
 - Per-host Triage panel collapse state persistence across page
   reloads (currently session-scoped via `state.collapsedTriage`).
+
+## v0.17.0 — Triage panel: persistence/evasion expansion (SHIPPED)
+
+Five new Quick Hits categories, all KeyPath-filtered over the RECmd
+rows already parsed. Encodes the kind of detection knowledge a
+RegRipper persistence plugin would carry, but sourced from the
+existing RECmd data so the "open in Registry →" deep-links keep
+working and the analyst validates/flags in the real artifact view.
+(Design call: surface candidates in triage; let the analyst confirm
+in the RECmd panel and apply the flag — marks stay analyst-curated.)
+
+**New groups (panel now has 11 total):**
+- [x] AppInit / AppCert DLLs (`appinit-dlls`) — `\Windows\AppInit_DLLs`,
+  `\Session Manager\AppCertDlls`, and the AppInit_DLLs/LoadAppInit_DLLs
+  named values. Shows all; skips the benign empty default. T1546.010/009.
+- [x] Image File Execution Options (`ifeo`) — Debugger / MonitorProcess /
+  GlobalFlag under `\Image File Execution Options\` and
+  `\SilentProcessExit\`. Shows all relevant values, ignores benign IFEO
+  tuning values. T1546.012.
+- [x] LSA packages (`lsa-packages`) — Security/Authentication/Notification
+  Packages under `\Control\Lsa`. DLLs loaded into lsass at boot;
+  credential-theft persistence. T1547.005 / T1556.002.
+- [x] COM server hijacks (`com-hijack`) — FILTERED (suspicious-path/
+  launcher only, like services) on `\CLSID\*\InprocServer32|
+  LocalServer32|InprocHandler32`. T1546.015.
+- [x] Defender tampering (`defender-tamper`) — disable-toggles (only
+  when value=1) + any `\Exclusions\` entry; surfaces the excluded path
+  (value name) as the finding primary. T1562.001.
+
+**Show-all vs. filtered split:**
+- Show all: AppInit, IFEO, LSA, Defender tampering (low volume, all
+  worth seeing).
+- Filtered to suspicious: COM hijacks (CLSID tree is huge).
+
+**Other:**
+- [x] `noneFoundMessage` extended with per-category messages for all
+  five new groups.
+- [x] `wantGroupCount` const in the test (now 11) so future group
+  add/remove touches one place.
+- [x] New unit tests: TestAppInitDlls, TestIFEO, TestLSAPackages,
+  TestDefenderTamper, TestCOMHijack. Each covers a true-positive plus
+  a benign/skip case.
+- [x] testdata WS-FIN-014 RECmd_Batch.csv extended with rows exercising
+  each new group, fitting the existing incident narrative (Vault
+  staging dir, masqueraded svchost, etc.).
+- [x] demo.html badge bumped to v0.17.0.
+
+**RECmd batch selection (Tier 1 of "let the analyst choose the .reb"):**
+- [x] `Config.RECmdBatch` field (json `recmdBatch,omitempty`) + Validate
+  (must be an existing `.reb` file, not a dir) + argv append
+  (`-RECmdBatch <path>`). The PS1 already accepted this param; the Go
+  side now plumbs it through. Tests: TestConfigValidate_RECmdBatch,
+  TestBuildArgs_RECmdBatch.
+- [x] PS1 auto-discovery `$preferred` list now recognizes
+  `DFIRBatch.reb` (added AFTER Kroll_Batch.reb so the default coverage
+  is unchanged — Kroll still wins when both are present). Both PS1
+  copies (root + internal/preprocess/) kept byte-identical; verified
+  with `diff -q` (same as `make check-ps1`).
+- [x] Updated the `.PARAMETER RECmdBatch` help text to list DFIRBatch
+  in the discovery order.
+- [ ] Tier 2 (NOT done): wizard UI dropdown to pick the .reb, backed by
+  a new GET /api/preprocess/batches?toolsRoot= discovery endpoint. The
+  RECmdBatch field is the hook it'll set; purely additive when built.
+  Note: a stdin Read-Host prompt in the PS1 is the WRONG approach (the
+  wizard runs it non-interactively; a prompt would hang). The choice
+  belongs in the wizard, passed via -RECmdBatch.
+
+**IMPORTANT caveat — batch coverage UNVERIFIED:**
+The new groups only surface findings if `Kroll_Batch.reb` actually
+collects those keys (AppInit, IFEO, LSA, CLSID, Defender). This was
+NOT verified against a real RECmd_Batch output — the testdata is
+synthetic. If the default Kroll batch does NOT collect one of these,
+that group will silently show "none found" (misleading: implies
+"checked, clean" when really "not collected"). BEFORE relying on
+these in a real case: run the default batch against a known-dirty
+hive and confirm each KeyPath appears in the output. If a key isn't
+collected, either add it to the batch or drop that group. High
+confidence the batch covers AppInit/IFEO/LSA; lower for COM (CLSID is
+huge) and Defender policy keys.
+
+**Not verified this session (no Go toolchain / network in workspace):**
+- `go test ./internal/triage/` not run. Filter logic traced by hand;
+  brace/paren balance clean; every group func wired into Analyze.
 
 ### Phase 3 host overview — Per-host targeted re-preprocessing
 

@@ -217,6 +217,14 @@ button { font-family: inherit; }
   box-shadow: 0 0 0 2px rgba(227,70,70,0.18);
 }
 
+/* User Activity subgroup: a collapsible header whose children (the
+   registry-derived user-activity artifacts) nest one level deeper. */
+.art-row.ua-group-head { color: var(--fg-2); font-weight: 600; }
+.art-row.ua-group-head .ico { color: var(--fg-3); font-size: 10px; }
+.art-row.ua-group-head.open { color: var(--fg); }
+.art-row.ua-child { padding-left: 26px; }
+.art-row.ua-child .ico { color: var(--fg-3); }
+
 /* footer in sidebar */
 .sb-foot {
   padding: 10px 12px;

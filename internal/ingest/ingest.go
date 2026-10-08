@@ -285,6 +285,36 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 			})
 			continue
 		}
+		// Merge multiple files that map to the same artifact ID into a
+		// single summary rather than appending duplicates. SBECmd is the
+		// motivating case: one CSV per user (Alice_UsrClass.csv,
+		// Bob_UsrClass.csv), all recognized as "shellbags". Without this,
+		// each becomes a separate "Shellbags" sidebar entry and
+		// LoadArtifact (first-match-wins) can only ever reach the first,
+		// making the others' rows unreachable. Instead: first file sets
+		// SourceFile; later ones append to ExtraSources; row/alert/sev
+		// counts accumulate. LoadArtifact concatenates all sources.
+		var existing *model.ArtifactSummary
+		for si := range host.ArtifactSummaries {
+			if host.ArtifactSummaries[si].ID == t.ID {
+				existing = &host.ArtifactSummaries[si]
+				break
+			}
+		}
+		if existing != nil {
+			existing.ExtraSources = append(existing.ExtraSources, path)
+			existing.RowCount += rowCount
+			existing.AlertCount += alertCount
+			if sevCounts != nil {
+				if existing.SeverityCounts == nil {
+					existing.SeverityCounts = map[string]int{}
+				}
+				for k, v := range sevCounts {
+					existing.SeverityCounts[k] += v
+				}
+			}
+			continue
+		}
 		host.ArtifactSummaries = append(host.ArtifactSummaries, model.ArtifactSummary{
 			ID:             t.ID,
 			Name:           t.Name,
@@ -297,6 +327,59 @@ func discoverHost(dir, name string) (model.Host, []EmptyArtifact, bool) {
 			SeverityCounts: sevCounts,
 		})
 	}
+	// Inject registry-derived "User Activity" artifacts. These have no
+	// CSV of their own -- they're slices of the RECmd registry rows by
+	// KeyPath (see useractivity.go). We find the registry artifact (if
+	// one was discovered above), parse it once, and emit a summary for
+	// each user-activity pattern that actually matched rows. Empty ones
+	// are reported as empties (hidden from the sidebar), so a missing
+	// User Activity artifact means "no rows collected" -- which also
+	// covers the case where the active RECmd batch simply didn't collect
+	// that key.
+	//
+	// Cost note: this is a full parse of the registry CSV at discovery
+	// time, in addition to the quickStat done in the loop above. For very
+	// large registry CSVs that's a second read; acceptable for now, could
+	// later share a single parse with the registry quickStat if it shows
+	// up in profiling.
+	var regSource string
+	for i := range host.ArtifactSummaries {
+		if host.ArtifactSummaries[i].ID == "registry" {
+			regSource = host.ArtifactSummaries[i].SourceFile
+			break
+		}
+	}
+	if regSource != "" {
+		if regRows, err := parseCSV(regSource); err == nil {
+			for _, ua := range UserActivityArtifacts {
+				n := 0
+				for ri := range regRows {
+					if ua.matches(regRows[ri]) {
+						n++
+					}
+				}
+				if n == 0 {
+					empties = append(empties, EmptyArtifact{
+						HostName:   host.Name,
+						ArtifactID: ua.ID,
+						Name:       ua.Name,
+						SourceFile: regSource,
+					})
+					continue
+				}
+				host.ArtifactSummaries = append(host.ArtifactSummaries, model.ArtifactSummary{
+					ID:         ua.ID,
+					Name:       ua.Name,
+					Icon:       ua.Icon,
+					Category:   UserActivityCategory,
+					Tool:       "RECmd",
+					SourceFile: regSource,
+					RowCount:   n,
+				})
+			}
+		}
+	}
+
 	if len(host.ArtifactSummaries) == 0 {
 		return host, empties, false
 	}
@@ -450,6 +533,43 @@ func (s *Store) LoadArtifact(hostID, artifactID string) (*model.Artifact, error)
 		return nil, fmt.Errorf("artifact %s/%s not found", hostID, artifactID)
 	}
 
+	// User-activity artifacts are registry-derived: parse the registry
+	// CSV (sum.SourceFile points at it) and return only the rows whose
+	// KeyPath matches this artifact's pattern. They aren't in the
+	// ArtifactTypes registry, so this must come before findType.
+	if ua := findUserActivity(artifactID); ua != nil {
+		regRows, err := parseCSV(sum.SourceFile)
+		if err != nil {
+			return nil, err
+		}
+		filtered := make([]model.Row, 0, sum.RowCount)
+		for ri := range regRows {
+			if ua.matches(regRows[ri]) {
+				filtered = append(filtered, regRows[ri])
+			}
+		}
+		art := &model.Artifact{
+			ID:         ua.ID,
+			Name:       ua.Name,
+			Icon:       ua.Icon,
+			Category:   UserActivityCategory,
+			Tool:       "RECmd",
+			SourceFile: sum.SourceFile,
+			Columns:    ua.Columns,
+			Rows:       filtered,
+			RowCount:   len(filtered),
+			// MuiCache has no execution timestamp, but every registry row
+			// carries the key's LastWriteTimestamp, so time correlation is
+			// still meaningful across the set.
+			PrimaryTime:   "LastWriteTimestamp",
+			ContextFields: []string{"KeyPath", "ValueName", "ValueData"},
+		}
+		s.mu.Lock()
+		s.loaded[key] = art
+		s.mu.Unlock()
+		return art, nil
+	}
+
 	t := findType(artifactID)
 	if t == nil {
 		return nil, fmt.Errorf("unknown artifact type: %s", artifactID)
@@ -461,9 +581,29 @@ func (s *Store) LoadArtifact(hostID, artifactID string) (*model.Artifact, error)
 	if parse == nil {
 		parse = parseCSV
 	}
+	// Parse the primary source, then any extra sources (multi-file
+	// artifacts like shellbags, one CSV per user) and concatenate. Each
+	// source's rows keep their own __row indexing from parseCSV; to keep
+	// __row unique across the merged set (deep-linking, marks), we
+	// re-index sequentially as we append.
 	rows, err := parse(sum.SourceFile)
 	if err != nil {
 		return nil, err
+	}
+	for _, extra := range sum.ExtraSources {
+		more, err := parse(extra)
+		if err != nil {
+			// One bad user file shouldn't sink the whole artifact; skip it
+			// but keep what parsed. (A corrupt per-user CSV is better shown
+			// partially than not at all.)
+			continue
+		}
+		rows = append(rows, more...)
+	}
+	// Re-index __row across the concatenated set so it's unique and
+	// contiguous (parseCSV numbers each file from 0).
+	for i := range rows {
+		rows[i]["__row"] = fmt.Sprintf("%d", i)
 	}
 	art := &model.Artifact{
 		ID:            t.ID,

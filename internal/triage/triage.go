@@ -157,6 +157,11 @@ func Analyze(hostName string, arts Artifacts) Result {
 		winlogonGroup(arts.Registry),
 		servicesGroup(arts.Registry),
 		schedTasksGroup(arts.Registry),
+		appInitDllsGroup(arts.Registry),
+		ifeoGroup(arts.Registry),
+		lsaPackagesGroup(arts.Registry),
+		comHijackGroup(arts.Registry),
+		defenderTamperGroup(arts.Registry),
 		suspAmcacheGroup(arts.Amcache),
 		suspPrefetchGroup(arts.Prefetch),
 	)
@@ -370,6 +375,209 @@ func suspPrefetchGroup(rows []model.Row) Group {
 			Secondary:      secondary,
 			Timestamp:      row["LastRun"],
 			SourceArtifact: "prefetch",
+			RowKey:         row["__row"],
+		})
+	}
+	return g
+}
+
+// ---- Item 11: AppInit_DLLs / AppCertDlls -----------------------------
+//
+// Shows ALL matches. These keys are empty on a clean system, so any
+// non-empty value is worth a look. AppInit_DLLs are loaded into every
+// process that links user32.dll; AppCertDlls into every process that
+// calls the Win32 process-creation APIs. Both are classic DLL-injection
+// persistence (MITRE T1546.010 / T1546.009).
+
+func appInitDllsGroup(rows []model.Row) Group {
+	g := Group{ID: "appinit-dlls", Title: "AppInit / AppCert DLLs", Icon: "\U0001F489",
+		SourceArtifact: "registry",
+		Note:           "These keys are empty on a clean system — any value warrants review"}
+	for _, row := range rows {
+		if !keyPathContains(row, `\windows\appinit_dlls`) &&
+			!keyPathContains(row, `\session manager\appcertdlls`) &&
+			// The AppInit value can also live as a named value under the
+			// Windows key; catch it by value name too.
+			!(keyPathContains(row, `\currentversion\windows`) &&
+				(strings.EqualFold(row["ValueName"], "AppInit_DLLs") ||
+					strings.EqualFold(row["ValueName"], "LoadAppInit_DLLs"))) {
+			continue
+		}
+		// Skip the benign default: LoadAppInit_DLLs=0 with empty
+		// AppInit_DLLs. Only surface non-empty payloads or an enabled flag.
+		data := strings.TrimSpace(row["ValueData"])
+		if strings.EqualFold(row["ValueName"], "AppInit_DLLs") && data == "" {
+			continue
+		}
+		g.Findings = append(g.Findings, Finding{
+			Primary:        valueOrDash(row["ValueData"]),
+			Secondary:      row["KeyPath"] + nameSuffix(row["ValueName"]),
+			Timestamp:      row["LastWriteTimestamp"],
+			SourceArtifact: "registry",
+			RowKey:         row["__row"],
+		})
+	}
+	return g
+}
+
+// ---- Item 12: Image File Execution Options debuggers -----------------
+//
+// Shows ALL matches. A Debugger value under IFEO causes Windows to
+// launch the named debugger INSTEAD of the target executable -- used
+// both for persistence and to disable security tools (a Debugger on
+// taskmgr.exe, or the sethc.exe / utilman.exe sticky-keys backdoor).
+// SilentProcessExit + MonitorProcess is a related abuse. Any Debugger
+// value here is worth a look (MITRE T1546.012).
+
+func ifeoGroup(rows []model.Row) Group {
+	g := Group{ID: "ifeo", Title: "Image File Execution Options", Icon: "\U0001FAB2",
+		SourceArtifact: "registry",
+		Note:           "A Debugger value hijacks the target exe; used for persistence and to disable security tools"}
+	for _, row := range rows {
+		inIFEO := keyPathContains(row, `\image file execution options\`)
+		inSilentExit := keyPathContains(row, `\silentprocessexit\`)
+		if !inIFEO && !inSilentExit {
+			continue
+		}
+		// Only the abuse-relevant values matter; the keys hold benign
+		// tuning values too (e.g. DisableExceptionChainValidation).
+		vn := strings.ToLower(row["ValueName"])
+		relevant := vn == "debugger" || vn == "monitorprocess" ||
+			vn == "globalflag" || vn == "reportingmode"
+		if !relevant {
+			continue
+		}
+		g.Findings = append(g.Findings, Finding{
+			Primary:        valueOrDash(row["ValueData"]),
+			Secondary:      row["KeyPath"] + nameSuffix(row["ValueName"]),
+			Timestamp:      row["LastWriteTimestamp"],
+			SourceArtifact: "registry",
+			RowKey:         row["__row"],
+		})
+	}
+	return g
+}
+
+// ---- Item 13: LSA security / authentication packages -----------------
+//
+// Shows ALL matches. The LSA loads the DLLs named in these values at
+// boot, in the highly-privileged lsass.exe process. A malicious SSP /
+// authentication package here is credential-theft persistence
+// (MITRE T1547.005 / T1556.002). The default values are well known, so
+// the analyst is scanning for an unexpected entry.
+
+func lsaPackagesGroup(rows []model.Row) Group {
+	g := Group{ID: "lsa-packages", Title: "LSA packages", Icon: "\U0001F511",
+		SourceArtifact: "registry",
+		Note:           "DLLs loaded into lsass.exe at boot — watch for unexpected entries"}
+	for _, row := range rows {
+		if !keyPathContains(row, `\control\lsa`) {
+			continue
+		}
+		vn := strings.ToLower(row["ValueName"])
+		relevant := vn == "security packages" || vn == "authentication packages" ||
+			vn == "notification packages" || vn == "lsapid" ||
+			strings.Contains(vn, "security package")
+		// Also catch the OSConfig / LsaCfgFlags subkeys by path.
+		if !relevant && !keyPathContains(row, `\lsa\ospackages`) {
+			continue
+		}
+		g.Findings = append(g.Findings, Finding{
+			Primary:        valueOrDash(row["ValueData"]),
+			Secondary:      row["KeyPath"] + nameSuffix(row["ValueName"]),
+			Timestamp:      row["LastWriteTimestamp"],
+			SourceArtifact: "registry",
+			RowKey:         row["__row"],
+		})
+	}
+	return g
+}
+
+// ---- Item 14: Defender tampering -------------------------------------
+//
+// Shows ALL matches. Disabling real-time protection, disabling the
+// antispyware engine, or adding path/process/extension exclusions are
+// strong defense-evasion signals (MITRE T1562.001). Exclusions in
+// particular are a favorite: attackers carve out the directory they
+// stage in so Defender ignores it.
+
+func defenderTamperGroup(rows []model.Row) Group {
+	g := Group{ID: "defender-tamper", Title: "Defender tampering", Icon: "\U0001F6E1",
+		SourceArtifact: "registry",
+		Note:           "Disabled protection or added exclusions — common defense-evasion"}
+	for _, row := range rows {
+		kp := strings.ToLower(row["KeyPath"])
+		if !strings.Contains(kp, `\windows defender`) &&
+			!strings.Contains(kp, `\microsoft\windows defender`) {
+			continue
+		}
+		// Exclusions live under \Exclusions\Paths|Processes|Extensions.
+		// Disable toggles are named values. Surface both.
+		inExclusions := strings.Contains(kp, `\exclusions\`)
+		vn := strings.ToLower(row["ValueName"])
+		isDisableToggle := strings.HasPrefix(vn, "disable") // DisableRealtimeMonitoring, DisableAntiSpyware, DisableBehaviorMonitoring, etc.
+		if !inExclusions && !isDisableToggle {
+			continue
+		}
+		// For a disable toggle, only flag when it's actually enabled
+		// (value 1). Exclusions are always interesting regardless.
+		if isDisableToggle && !inExclusions {
+			data := strings.TrimSpace(row["ValueData"])
+			if data == "0" || data == "" {
+				continue
+			}
+		}
+		primary := row["ValueData"]
+		if inExclusions {
+			// For exclusions, the excluded path/process is usually the
+			// value NAME, with the data being a flag. Show the name.
+			primary = row["ValueName"]
+		}
+		g.Findings = append(g.Findings, Finding{
+			Primary:        valueOrDash(primary),
+			Secondary:      row["KeyPath"] + nameSuffix(row["ValueName"]),
+			Timestamp:      row["LastWriteTimestamp"],
+			SourceArtifact: "registry",
+			RowKey:         row["__row"],
+		})
+	}
+	return g
+}
+
+// ---- Item 15: COM hijacking (filtered) -------------------------------
+//
+// FILTERED to suspicious paths only. The CLSID tree has thousands of
+// legitimate entries, so -- like services -- listing them all would
+// bury the signal. We flag InprocServer32 / LocalServer32 entries whose
+// server path lives in a suspicious location or references a script
+// launcher. COM hijacking (MITRE T1546.015) persists by pointing a
+// CLSID a target process loads at an attacker DLL/EXE. The classic
+// abuse is a per-user HKCU\Software\Classes\CLSID entry shadowing an
+// HKLM one.
+
+func comHijackGroup(rows []model.Row) Group {
+	g := Group{ID: "com-hijack", Title: "COM server hijacks", Icon: "\U0001F9E9",
+		SourceArtifact: "registry",
+		Note:           "Filtered to CLSID servers in unusual paths or via script interpreters"}
+	for _, row := range rows {
+		kp := strings.ToLower(row["KeyPath"])
+		if !strings.Contains(kp, `\clsid\`) {
+			continue
+		}
+		if !strings.Contains(kp, `\inprocserver32`) &&
+			!strings.Contains(kp, `\localserver32`) &&
+			!strings.Contains(kp, `\inprochandler32`) {
+			continue
+		}
+		data := row["ValueData"]
+		if !looksSuspiciousPath(data) && !looksSuspiciousLauncher(data) {
+			continue
+		}
+		g.Findings = append(g.Findings, Finding{
+			Primary:        valueOrDash(data),
+			Secondary:      row["KeyPath"] + nameSuffix(row["ValueName"]),
+			Timestamp:      row["LastWriteTimestamp"],
+			SourceArtifact: "registry",
 			RowKey:         row["__row"],
 		})
 	}

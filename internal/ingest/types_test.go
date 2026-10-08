@@ -45,9 +45,18 @@ func TestRecognize(t *testing.T) {
 		// outputs instead.
 		{"JLECmd_AutomaticDestinations.csv", "jumplist-auto"},
 		{"JLECmd_CustomDestinations.csv", "jumplist-custom"},
-		// Shellbags: SBECmd produces dated outputs split by hive.
-		{"20260515093000_SBECmd_NTUSER_Output.csv", "shellbags"},
-		{"20260515093000_SBECmd_UsrClass_Output.csv", "shellbags"},
+		// Shellbags: SBECmd run with `-d <profiles> --csv` names its
+		// output "<username>_NTUSER.csv" / "<username>_UsrClass.csv"
+		// (NOT "SBECmd_..._Output.csv" -- that was a Douglas-side
+		// fiction the pattern was wrongly anchored to, so it never
+		// matched real output). Recognise the real per-user forms.
+		{"Jean-Luc_NTUSER.csv", "shellbags"},
+		{"Jean-Luc_UsrClass.csv", "shellbags"},
+		{"Administrator_UsrClass.csv", "shellbags"},
+		// USN journal: MFTECmd's $J output. Must resolve to "usn", not
+		// "mft", despite both being MFTECmd Filesystem artifacts.
+		{"MFTECmd_UsnJrnl_Output.csv", "usn"},
+		{"MFTECmd_Output.csv", "mft"},
 		// BITS jobs from BitsParser (community tool, not EZ Tools).
 		{"BitsParser_Output.csv", "bits"},
 		{"20260515093000_BitsParser_Output.csv", "bits"},

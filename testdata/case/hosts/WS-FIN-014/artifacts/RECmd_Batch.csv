@@ -4,3 +4,9 @@ LastWriteTimestamp,KeyPath,ValueName,ValueData,Category,Comment
 2025-11-08 04:01:34.117,HKCU\Software\rclone,ConfigPath,C:\Users\jbeck\AppData\Roaming\rclone.conf,Exfiltration,Rclone configuration registered
 2025-11-08 03:32:11.110,HKCU\Software\Microsoft\Windows\CurrentVersion\PowerShell\1\ShellIds\Microsoft.PowerShell,ExecutionPolicy,Bypass,Defense Evasion,PowerShell execution policy disabled
 2024-02-15 18:01:00.000,HKLM\SOFTWARE\Google\Chrome,Version,120.0.6099.71,Application,
+2025-11-08 03:45:22.000,HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows,AppInit_DLLs,C:\ProgramData\Microsoft\Vault\inject.dll,Persistence,AppInit DLL injection persistence
+2025-11-08 03:46:10.000,HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe,Debugger,C:\Windows\System32\cmd.exe,Defense Evasion,IFEO debugger disabling Task Manager
+2025-11-08 03:50:33.000,HKLM\SYSTEM\CurrentControlSet\Control\Lsa,Security Packages,kerberos msv1_0 schannel wdigest mimilib,Persistence,Malicious SSP registered in LSA
+2025-11-08 03:12:45.000,HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths,C:\ProgramData\Microsoft\Vault,0,Defense Evasion,Defender exclusion carved out for staging dir
+2025-11-08 03:11:02.000,HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection,DisableRealtimeMonitoring,1,Defense Evasion,Real-time protection disabled
+2025-11-08 03:48:19.000,HKCU\Software\Classes\CLSID\{AB8902B4-09CA-4bb6-B78D-A8F59079A8D5}\InprocServer32,(default),C:\Users\jbeck\AppData\Roaming\thumbcache.dll,Persistence,COM hijack of thumbnail cache handler

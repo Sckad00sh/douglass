@@ -63,10 +63,13 @@
 .PARAMETER RECmdBatch
     Path to the RECmd batch file (.reb) to apply when RECmd runs. If omitted,
     the script looks for these in order under <ToolsRoot>:
-        BatchExamples\Kroll_Batch.reb     (recommended; comprehensive DFIR set)
+        BatchExamples\Kroll_Batch.reb     (default; comprehensive DFIR set)
+        BatchExamples\DFIRBatch.reb       (leaner, triage-focused set)
         BatchExamples\RECmd_Batch_MC.reb  (Mark Hallman's batch)
         any *.reb in BatchExamples\
     If none is found and -RECmdBatch wasn't passed, RECmd is skipped.
+    Note: Kroll_Batch.reb is preferred when present; pass -RECmdBatch
+    explicitly to force a different one (e.g. DFIRBatch.reb).
 
     The Kroll_Batch.reb file ships with the standard EZ Tools distribution.
     If you don't have it, grab it from:
@@ -182,6 +185,11 @@ Set-StrictMode -Version Latest
 
 # ---------- console helpers ----------
 
+# Status helpers. Write-Host output goes to the console window AND (when
+# the script runs with redirected output under the Go server) is captured
+# into the stream the server reads -- so a single Write-Host reaches both
+# the console and the browser panel. No extra stdout marker is needed;
+# emitting one caused every status line to appear twice.
 function Write-Section { param([string]$Msg)
     Write-Host ""
     Write-Host ("=" * 72) -ForegroundColor DarkGray
@@ -453,7 +461,12 @@ function Get-ImageNetworkInfo {
             $dns  = @()
 
             # Each interface lives under a GUID subkey. Iterate every one.
+            # Track counts so a downstream caller can report *why* network
+            # came back empty (no interface subkeys at all vs. interfaces
+            # present but none carrying a usable address -- common on
+            # DHCP-leased images where the persisted hive has 0.0.0.0).
             $interfaces = Get-ChildItem -Path $ifBase -ErrorAction SilentlyContinue
+            $script:DouglasNetIfCount = ($interfaces | Measure-Object).Count
             foreach ($iface in $interfaces) {
                 $props = Get-ItemProperty -Path $iface.PSPath -ErrorAction SilentlyContinue
                 if (-not $props) { continue }
@@ -605,6 +618,32 @@ function Invoke-Tool {
         [Parameter(Mandatory)][string[]]$Args,
         [Parameter(Mandatory)][string]$LogPath
     )
+    # Step tracking. $script:DouglasStepTotal is set once in main (the
+    # count of selected tools); $script:DouglasStepNum increments here.
+    # We emit a structured marker on its own line that the Go server
+    # parses out of the stream (like DOUGLAS_RESULT_CASE_DIR=). Format:
+    #   DOUGLAS_STEP=<n>/<total>|<label>
+    # The marker is written to BOTH the streamed output (for the server)
+    # and is intentionally cheap so it flushes promptly -- it's emitted
+    # at tool START, before the tool's own (buffered) output, so the UI
+    # can show "Step n/total: <tool>" and start its stall timer even
+    # while a long tool (RECmd) runs silently.
+    # StrictMode-safe access: under Set-StrictMode -Version Latest, reading
+    # an unset variable throws. Test-Path on the variable provider lets us
+    # default cleanly even if these were somehow never initialized.
+    $curNum = if (Test-Path variable:script:DouglasStepNum) { $script:DouglasStepNum } else { 0 }
+    $script:DouglasStepNum = $curNum + 1
+    $total = if (Test-Path variable:script:DouglasStepTotal) { $script:DouglasStepTotal } else { 0 }
+    if (-not $total) { $total = 0 }
+    # Emit the marker via Write-Output -> PowerShell success stream ->
+    # the Go server's redirected StdoutPipe. Write-Output does NOT write
+    # to the console screen buffer (unlike [Console]::Out.WriteLine, which
+    # prints to the visible window), so these internal markers stay out of
+    # the console. Return-value pollution is avoided because Invoke-Tool no
+    # longer returns via the pipeline -- it sets $script:LastToolOk (see
+    # end of function) and callers read that.
+    Write-Output "DOUGLAS_STEP=$($script:DouglasStepNum)/$total|$Label"
+
     # Quote any args that contain whitespace so the logged command line is
     # copy-pasteable. The PowerShell 5.1-compatible -join operator works
     # everywhere; Join-String is 7.0+ only.
@@ -616,21 +655,72 @@ function Invoke-Tool {
     Add-Content -LiteralPath $LogPath -Value "`n[$([DateTime]::Now.ToString('o'))] $Label"
     Add-Content -LiteralPath $LogPath -Value "  cmd: $cmdLine"
 
-    # Capture both streams. Tee-Object would mix them; we want them merged
-    # but logged separately. & runs the binary; 2>&1 merges streams.
-    $out = & $Exe @Args 2>&1
-    $code = $LASTEXITCODE
-    foreach ($line in $out) {
-        Add-Content -LiteralPath $LogPath -Value "  | $line"
+    # Output routing (three sinks, now correctly separated):
+    #
+    #  1. LOG FILE (run-zimmerman.log) -- every raw line, verbatim.
+    #  2. STDOUT PIPE (Go server / browser) -- the DOUGLAS_TOOL| heartbeat,
+    #     via Write-Output (success stream -> redirected pipe). This does
+    #     NOT print to the console screen.
+    #  3. CONSOLE WINDOW -- only the in-place spinner pulse (Write-Host with
+    #     \r). Raw tool output is NOT echoed to the console.
+    #
+    # CRITICAL: under $ErrorActionPreference='Stop', a tool writing to
+    # stderr (merged via 2>&1) would terminate the script. Relax to
+    # 'Continue' for just the external call, then restore.
+    $code = 0
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $spinner = '|','/','-','\'
+    $spinIdx = 0
+    $lineCount = 0
+    $toolStart = Get-Date
+    $lastPulse = Get-Date
+    try {
+        & $Exe @Args 2>&1 | ForEach-Object {
+            $line = $_
+            $lineCount++
+            # Strip ANSI/VT color escapes (RECmd, Hayabusa emit them).
+            $clean = [regex]::Replace([string]$line, "$([char]27)\[[0-9;]*m", '')
+            try {
+                # (1) full output -> log file
+                Add-Content -LiteralPath $LogPath -Value "  | $clean"
+            } catch {}
+            # (2) heartbeat -> stdout pipe via Write-Output (NOT console)
+            Write-Output "DOUGLAS_TOOL|$clean"
+            # (3) console: in-place spinner pulse, throttled to ~4x/sec.
+            $now = Get-Date
+            if (($now - $lastPulse).TotalMilliseconds -ge 250) {
+                $lastPulse = $now
+                $spinIdx = ($spinIdx + 1) % 4
+                $elapsed = ('{0:mm\:ss}' -f ($now - $toolStart))
+                try {
+                    Write-Host ("`r    {0} {1}  {2}  ({3} lines)        " -f `
+                        $spinner[$spinIdx], $Label, $elapsed, $lineCount) `
+                        -NoNewline -ForegroundColor DarkGray
+                } catch {}
+            }
+        }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
     }
+    if ($null -eq $code) { $code = 0 }
+    # Clear the pulse line so the final ok/FAIL line starts clean.
+    try { Write-Host ("`r" + (' ' * 70) + "`r") -NoNewline } catch {}
     Add-Content -LiteralPath $LogPath -Value "  exit: $code"
 
+    # Report success via a script-scoped flag, NOT a pipeline return.
+    # Because this function now emits DOUGLAS_* markers via Write-Output
+    # (so they reach the server without printing to the console), a
+    # `return $true` would be just one more object in the output stream --
+    # callers can't distinguish it from the markers. Setting a script var
+    # sidesteps that entirely. Callers read $script:LastToolOk.
     if ($code -eq 0) {
         Write-Ok "$Label (exit 0)"
-        return $true
+        $script:LastToolOk = $true
     } else {
         Write-Fail "$Label (exit $code) -- see transcript for details"
-        return $false
+        $script:LastToolOk = $false
     }
 }
 
@@ -710,6 +800,25 @@ foreach ($t in $selected) {
     }
 }
 
+# Step tracking for the UI progress bar. The total is the number of tools
+# whose binary was found -- the upper bound on Invoke-Tool calls. Some may
+# still self-skip inside their block when the source data is absent (e.g.
+# no Prefetch dir), so the final step number can legitimately come in
+# under the total; the UI treats "n/total" as "n done of up-to total",
+# not a strict denominator. DouglasStepNum is incremented inside
+# Invoke-Tool. Note: some tools (RECmd, Hayabusa) issue more than one
+# Invoke-Tool call (e.g. Hayabusa update-rules + csv-timeline); those are
+# rare and only nudge the count slightly past total, which the UI clamps.
+$script:DouglasStepTotal = $toolPath.Count
+$script:DouglasStepNum = 0
+# Network probe diagnostic counter -- initialized here so it always
+# exists even if Get-ImageNetworkInfo bails before its interface loop
+# (under Set-StrictMode, reading an unset variable is a terminating
+# error). Get-ImageNetworkInfo overwrites this with the real count when
+# it reaches the loop; the call site reads it to distinguish "no
+# interfaces found" from "interfaces present but no usable IP".
+$script:DouglasNetIfCount = 0
+
 # Common image paths we'll need
 $systemHive    = Join-Path $ImagePath 'Windows\System32\config\SYSTEM'
 $softwareHive  = Join-Path $ImagePath 'Windows\System32\config\SOFTWARE'
@@ -730,13 +839,39 @@ Write-Section "Running tools"
 if ($toolPath.ContainsKey('mft')) {
     if (Test-Path -LiteralPath $mftPath) {
         Write-Step "MFTECmd ($mftPath)"
-        $null = Invoke-Tool -Label 'MFTECmd' -Exe $toolPath['mft'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'MFTECmd' -Exe $toolPath['mft'] -LogPath $transcript -Args @(
             '-f', $mftPath,
             '--csv', $artDir,
             '--csvf', 'MFTECmd_Output.csv'
         )
     } else {
-        Write-Skip "MFTECmd: \$MFT not found at $mftPath (NTFS root not directly accessible?)"
+        Write-Skip ('MFTECmd: $MFT not found at ' + $mftPath + ' (NTFS root not directly accessible?)')
+    }
+
+    # USN journal ($J). The change journal is a running log of filesystem
+    # operations (create/delete/rename/data-overwrite) with timestamps --
+    # invaluable for catching files that were created and later deleted
+    # (staging + cleanup) that the $MFT alone may no longer reflect.
+    #
+    # $J lives as the :$J alternate data stream of $Extend\$UsnJrnl. On a
+    # mounted image the raw stream is addressed as "...\$Extend\$UsnJrnl:$J".
+    # We pass -m <$MFT> so MFTECmd can resolve each record's parent
+    # file-reference to a full path (without it you get entry names but no
+    # parent path). Whether the ADS is exposed depends on the mount; if
+    # it's not present we skip cleanly.
+    $usnPath = Join-Path $ImagePath '$Extend\$UsnJrnl:$J'
+    # Test-Path can't stat an ADS by itself, so probe the parent file and
+    # let MFTECmd report if the stream is unreadable.
+    $usnParent = Join-Path $ImagePath '$Extend\$UsnJrnl'
+    if (Test-Path -LiteralPath $usnParent) {
+        Write-Step ('MFTECmd USN journal ($Extend\$UsnJrnl:$J)')
+        $usnArgs = @('-f', $usnPath, '--csv', $artDir, '--csvf', 'MFTECmd_UsnJrnl_Output.csv')
+        if (Test-Path -LiteralPath $mftPath) {
+            $usnArgs += @('-m', $mftPath)
+        }
+        Invoke-Tool -Label 'MFTECmd-USN' -Exe $toolPath['mft'] -LogPath $transcript -Args $usnArgs
+    } else {
+        Write-Skip ('MFTECmd USN: $Extend\$UsnJrnl not found (mount may not expose it, or journal disabled)')
     }
 }
 
@@ -744,7 +879,7 @@ if ($toolPath.ContainsKey('mft')) {
 if ($toolPath.ContainsKey('amcache')) {
     if (Test-Path -LiteralPath $amcachePath) {
         Write-Step "AmcacheParser"
-        $null = Invoke-Tool -Label 'AmcacheParser' -Exe $toolPath['amcache'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'AmcacheParser' -Exe $toolPath['amcache'] -LogPath $transcript -Args @(
             '-f', $amcachePath,
             '-i',                          # include file entries for Programs entries
             '--csv', $artDir,
@@ -760,7 +895,7 @@ if ($toolPath.ContainsKey('amcache')) {
 if ($toolPath.ContainsKey('shimcache')) {
     if (Test-Path -LiteralPath $systemHive) {
         Write-Step "AppCompatCacheParser"
-        $null = Invoke-Tool -Label 'AppCompatCacheParser' -Exe $toolPath['shimcache'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'AppCompatCacheParser' -Exe $toolPath['shimcache'] -LogPath $transcript -Args @(
             '-f', $systemHive,
             '--csv', $artDir,
             '--csvf', 'SYSTEM_AppCompatCache.csv',
@@ -783,7 +918,7 @@ if ($toolPath.ContainsKey('evtx')) {
         if ($MapsPath) {
             $args += @('--maps', $MapsPath)
         }
-        $null = Invoke-Tool -Label 'EvtxECmd' -Exe $toolPath['evtx'] -LogPath $transcript -Args $args
+        Invoke-Tool -Label 'EvtxECmd' -Exe $toolPath['evtx'] -LogPath $transcript -Args $args
     } else {
         Write-Skip "EvtxECmd: $evtxDir not found"
     }
@@ -793,7 +928,7 @@ if ($toolPath.ContainsKey('evtx')) {
 if ($toolPath.ContainsKey('prefetch')) {
     if (Test-Path -LiteralPath $prefetchDir) {
         Write-Step "PECmd ($prefetchDir)"
-        $null = Invoke-Tool -Label 'PECmd' -Exe $toolPath['prefetch'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'PECmd' -Exe $toolPath['prefetch'] -LogPath $transcript -Args @(
             '-d', $prefetchDir,
             '--csv', $artDir,
             '--csvf', 'PECmd_Output.csv'
@@ -807,7 +942,7 @@ if ($toolPath.ContainsKey('prefetch')) {
 if ($toolPath.ContainsKey('recyclebin')) {
     if (Test-Path -LiteralPath $recycleBin) {
         Write-Step "RBCmd (`$Recycle.Bin)"
-        $null = Invoke-Tool -Label 'RBCmd' -Exe $toolPath['recyclebin'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'RBCmd' -Exe $toolPath['recyclebin'] -LogPath $transcript -Args @(
             '-d', $recycleBin,
             '--csv', $artDir,
             '--csvf', 'RBCmd_Output.csv'
@@ -821,7 +956,7 @@ if ($toolPath.ContainsKey('recyclebin')) {
 if ($toolPath.ContainsKey('lnk')) {
     if (Test-Path -LiteralPath $userProfiles) {
         Write-Step "LECmd (Users\*\AppData\Roaming\Microsoft\Windows\Recent\*)"
-        $null = Invoke-Tool -Label 'LECmd' -Exe $toolPath['lnk'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'LECmd' -Exe $toolPath['lnk'] -LogPath $transcript -Args @(
             '-d', $userProfiles,
             '--csv', $artDir,
             '--csvf', 'LECmd_Output.csv'
@@ -842,7 +977,7 @@ if ($toolPath.ContainsKey('jumplist')) {
         # schemas differ slightly (Auto has Hostname/FileSize, Custom
         # has Name). The previous --csvf JLECmd_Output.csv override
         # produced a filename Douglas didn't recognise.
-        $null = Invoke-Tool -Label 'JLECmd' -Exe $toolPath['jumplist'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'JLECmd' -Exe $toolPath['jumplist'] -LogPath $transcript -Args @(
             '-d', $userProfiles,
             '--csv', $artDir
         )
@@ -855,7 +990,7 @@ if ($toolPath.ContainsKey('jumplist')) {
 if ($toolPath.ContainsKey('shellbags')) {
     if (Test-Path -LiteralPath $userProfiles) {
         Write-Step "SBECmd ($userProfiles)"
-        $null = Invoke-Tool -Label 'SBECmd' -Exe $toolPath['shellbags'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'SBECmd' -Exe $toolPath['shellbags'] -LogPath $transcript -Args @(
             '-d', $userProfiles,
             '--csv', $artDir,
             '--nl'
@@ -886,7 +1021,7 @@ if ($toolPath.ContainsKey('recmd')) {
             (Join-Path $ToolsRoot 'BatchExamples'),
             (Join-Path $ToolsRoot 'RECmd\BatchExamples')
         )
-        $preferred = @('Kroll_Batch.reb', 'RECmd_Batch_MC.reb')
+        $preferred = @('Kroll_Batch.reb', 'DFIRBatch.reb', 'RECmd_Batch_MC.reb')
         foreach ($root in $searchRoots) {
             if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
             foreach ($name in $preferred) {
@@ -923,13 +1058,22 @@ if ($toolPath.ContainsKey('recmd')) {
         # we omit it for compatibility across RECmd versions.
         # RECmd discovers SYSTEM, SOFTWARE, NTUSER.DAT, UsrClass.dat etc.
         # automatically by walking the directory tree.
-        $null = Invoke-Tool -Label 'RECmd' -Exe $toolPath['recmd'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'RECmd' -Exe $toolPath['recmd'] -LogPath $transcript -Args @(
             '-d', $ImagePath,
             '--bn', $batchToUse,
             '--csv', $artDir,
             '--csvf', 'RECmd_Batch.csv',
             '--nl'
         )
+        # RECmd exits 0 even when it finds no hives (e.g. "Could not access
+        # all files ... rerun with Administrator privileges / Total hives
+        # found: 0"). That leaves no RECmd_Batch.csv, which means no
+        # registry artifact and no User Activity views downstream -- a
+        # silent gap unless we check for the output file explicitly.
+        $recmdOut = Join-Path $artDir 'RECmd_Batch.csv'
+        if (-not (Test-Path -LiteralPath $recmdOut)) {
+            Write-Skip "RECmd produced no RECmd_Batch.csv -- registry artifacts (incl. User Activity) will be absent. Most common cause: not running as Administrator, or the image mount doesn't expose locked hive files. Check the RECmd output above for 'rerun with Administrator privileges'."
+        }
     }
 }
 
@@ -944,7 +1088,8 @@ if ($toolPath.ContainsKey('srum')) {
         } else {
             Write-Skip "SrumECmd: SOFTWARE hive missing; network names won't resolve"
         }
-        $ok = Invoke-Tool -Label 'SrumECmd' -Exe $toolPath['srum'] -LogPath $transcript -Args $args
+        Invoke-Tool -Label 'SrumECmd' -Exe $toolPath['srum'] -LogPath $transcript -Args $args
+        $ok = $script:LastToolOk
         if (-not $ok) {
             # The most common failure mode here is "dirty database" -- surface a
             # pointer to the repair procedure rather than just failing silently.
@@ -962,7 +1107,7 @@ if ($toolPath.ContainsKey('srum')) {
 if ($toolPath.ContainsKey('sum')) {
     if (Test-Path -LiteralPath $sumDir) {
         Write-Step "SumECmd ($sumDir)"
-        $null = Invoke-Tool -Label 'SumECmd' -Exe $toolPath['sum'] -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'SumECmd' -Exe $toolPath['sum'] -LogPath $transcript -Args @(
             '-d', $sumDir,
             '--csv', $artDir
         )
@@ -997,7 +1142,7 @@ if ($RunHayabusa) {
                 Write-Step "Hayabusa: updating rules (network required)"
                 Push-Location -LiteralPath $hayaDir
                 try {
-                    $null = Invoke-Tool -Label 'hayabusa update-rules' -Exe $hayaExe -LogPath $transcript -Args @('update-rules')
+                    Invoke-Tool -Label 'hayabusa update-rules' -Exe $hayaExe -LogPath $transcript -Args @('update-rules')
                 } finally {
                     Pop-Location
                 }
@@ -1019,7 +1164,7 @@ if ($RunHayabusa) {
             # regardless of where the user invoked this script from.
             Push-Location -LiteralPath $hayaDir
             try {
-                $null = Invoke-Tool -Label 'hayabusa csv-timeline' -Exe $hayaExe -LogPath $transcript -Args @(
+                Invoke-Tool -Label 'hayabusa csv-timeline' -Exe $hayaExe -LogPath $transcript -Args @(
                     'csv-timeline',
                     '-d', $evtxDir,
                     '-o', $hayaOut,
@@ -1079,7 +1224,7 @@ if ($RunBitsParser) {
         # Argument set tracked here for the most common BitsParser variant.
         # If your fork uses different flags, change this argv -- the only
         # contract Douglas cares about is the *BitsParser*.csv output name.
-        $null = Invoke-Tool -Label 'BitsParser' -Exe $bitsExe -LogPath $transcript -Args @(
+        Invoke-Tool -Label 'BitsParser' -Exe $bitsExe -LogPath $transcript -Args @(
             '--input', $bitsDir,
             '--output', $bitsOut,
             '--format', 'csv'
@@ -1151,9 +1296,29 @@ if ($osInfo -and $osInfo.build) { $identity.build = $osInfo.build }
 if ($archProbe)             { $identity.arch      = $archProbe }
 if ($tzProbe)               { $identity.timeZone  = $tzProbe }
 
+# Surface probe gaps. These offline reads (reg.exe load of SYSTEM/NTUSER)
+# need admin + an accessible image. When they come back empty the host
+# overview silently shows a fallback hostname and blank cards, so call it
+# out here -- the most common cause is running without Administrator
+# rights or an image mount that doesn't expose locked hive files.
+if (-not $tzProbe) {
+    Write-Skip "Time zone not read from SYSTEM hive (offline probe failed -- admin rights / image access?)"
+}
+if ($HostName -like 'HOST-*') {
+    Write-Skip "Host name not read from SYSTEM hive; using generated fallback '$HostName' (admin rights / image access?)"
+}
+
 # Network: from offline registry. Returns $null when no usable entries
 # were found; we omit the whole block in that case.
 $netProbe = Get-ImageNetworkInfo -ImageRoot $ImagePath
+if (-not $netProbe) {
+    $ifSeen = if (Test-Path variable:script:DouglasNetIfCount) { $script:DouglasNetIfCount } else { 0 }
+    if ($null -eq $ifSeen -or $ifSeen -eq 0) {
+        Write-Skip "Network config not read: no interface subkeys under Tcpip\Parameters\Interfaces (hive unreadable / admin rights / image access?)"
+    } else {
+        Write-Skip "Network config not read: $ifSeen interface(s) found but none had a usable IP in the persisted hive (DHCP-leased image stores 0.0.0.0 until renewed -- this is expected for some captures)"
+    }
+}
 
 # Hardware: offline reads are unreliable for CPU/RAM/disk specs (the
 # HARDWARE hive is volatile and usually not captured by KAPE). The

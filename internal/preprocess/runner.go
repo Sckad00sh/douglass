@@ -119,6 +119,7 @@ type Config struct {
 	HostName         string   `json:"hostName,omitempty"`
 	CaseID           string   `json:"caseId,omitempty"`
 	ToolsRoot        string   `json:"toolsRoot,omitempty"`
+	RECmdBatch       string   `json:"recmdBatch,omitempty"`
 	ToolFilter       []string `json:"toolFilter,omitempty"`
 	Operator         string   `json:"operator,omitempty"`
 	CollectionMethod string   `json:"collectionMethod,omitempty"`
@@ -179,6 +180,21 @@ func (c Config) Validate() error {
 			return fmt.Errorf("toolsRoot: %w", err)
 		} else if !st.IsDir() {
 			return errors.New("toolsRoot is not a directory")
+		}
+	}
+	// RECmdBatch if provided must be an existing .reb file. It's passed
+	// through to the PS1's -RECmdBatch parameter, overriding the script's
+	// auto-discovery. We require it to exist (rather than letting the PS1
+	// fail mid-run) and to carry the .reb extension so a typo'd path to
+	// some other file can't be handed to RECmd's --bn.
+	if c.RECmdBatch != "" {
+		if !strings.EqualFold(filepath.Ext(c.RECmdBatch), ".reb") {
+			return errors.New("recmdBatch must be a .reb file")
+		}
+		if st, err := os.Stat(c.RECmdBatch); err != nil {
+			return fmt.Errorf("recmdBatch: %w", err)
+		} else if st.IsDir() {
+			return errors.New("recmdBatch is a directory, not a .reb file")
 		}
 	}
 	// ToolFilter entries must be in the canonical list.
@@ -404,6 +420,9 @@ func (r *Runner) buildArgs(cfg Config) []string {
 	}
 	if cfg.ToolsRoot != "" {
 		args = append(args, "-ToolsRoot", cfg.ToolsRoot)
+	}
+	if cfg.RECmdBatch != "" {
+		args = append(args, "-RECmdBatch", cfg.RECmdBatch)
 	}
 	if len(cfg.ToolFilter) > 0 {
 		// PowerShell accepts comma-separated values for string[]

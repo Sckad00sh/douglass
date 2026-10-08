@@ -44,6 +44,88 @@ func TestConfigValidate_GoodCase(t *testing.T) {
 	}
 }
 
+// TestConfigValidate_RECmdBatch covers the optional RECmdBatch override:
+// a real .reb file is accepted, a non-.reb file is rejected, a
+// nonexistent path is rejected, and empty (the common case) is fine.
+func TestConfigValidate_RECmdBatch(t *testing.T) {
+	imgDir := t.TempDir()
+	outDir := filepath.Join(t.TempDir(), "case")
+	batchDir := t.TempDir()
+
+	rebPath := filepath.Join(batchDir, "DFIRBatch.reb")
+	if err := os.WriteFile(rebPath, []byte("Description: test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notReb := filepath.Join(batchDir, "notes.txt")
+	if err := os.WriteFile(notReb, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := Config{ImagePath: imgDir, OutputRoot: outDir}
+
+	// Empty -> fine (auto-discovery in the PS1 takes over).
+	if err := base.Validate(); err != nil {
+		t.Errorf("empty RECmdBatch rejected: %v", err)
+	}
+	// Real .reb -> accepted.
+	c := base
+	c.RECmdBatch = rebPath
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid .reb rejected: %v", err)
+	}
+	// Wrong extension -> rejected.
+	c = base
+	c.RECmdBatch = notReb
+	if err := c.Validate(); err == nil {
+		t.Error("non-.reb file accepted as RECmdBatch")
+	}
+	// Nonexistent -> rejected.
+	c = base
+	c.RECmdBatch = filepath.Join(batchDir, "missing.reb")
+	if err := c.Validate(); err == nil {
+		t.Error("nonexistent .reb accepted as RECmdBatch")
+	}
+	// A directory named like a .reb -> rejected.
+	dirReb := filepath.Join(batchDir, "weird.reb")
+	if err := os.Mkdir(dirReb, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c = base
+	c.RECmdBatch = dirReb
+	if err := c.Validate(); err == nil {
+		t.Error("directory accepted as RECmdBatch")
+	}
+}
+
+// TestBuildArgs_RECmdBatch verifies the flag reaches argv when set and
+// is absent when not.
+func TestBuildArgs_RECmdBatch(t *testing.T) {
+	r := &Runner{scriptPath: "/x/Run-ZimmermanTools.ps1"}
+
+	// Absent when empty.
+	args := r.buildArgs(Config{ImagePath: "/img", OutputRoot: "/out"})
+	for _, a := range args {
+		if a == "-RECmdBatch" {
+			t.Fatal("-RECmdBatch present when RECmdBatch was empty")
+		}
+	}
+
+	// Present + paired with its value when set.
+	args = r.buildArgs(Config{ImagePath: "/img", OutputRoot: "/out", RECmdBatch: "/b/DFIRBatch.reb"})
+	found := false
+	for i, a := range args {
+		if a == "-RECmdBatch" {
+			found = true
+			if i+1 >= len(args) || args[i+1] != "/b/DFIRBatch.reb" {
+				t.Errorf("-RECmdBatch not followed by its value; args=%v", args)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("-RECmdBatch missing from argv; args=%v", args)
+	}
+}
+
 // TestConfigValidate_BadPaths checks that nonexistent paths are
 // rejected. Without this, a malformed config could end up as a
 // subprocess invocation that fails late with a noisy PowerShell

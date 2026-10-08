@@ -26,13 +26,46 @@ type ArtifactType struct {
 // not be claimed by a generic "Amcache" rule).
 var ArtifactTypes = []ArtifactType{
 	{
+		// USN journal ($J) MUST come before the "mft" entry: its file
+		// name (MFTECmd_UsnJrnl_Output.csv) also matches the MFT pattern
+		// (MFT.*Output.*\.csv), and Recognize is first-match-wins. The
+		// UsnJrnl-specific pattern here claims it first. (Same ordering
+		// trick as prefetch-timeline before prefetch.)
+		ArtifactType: model.ArtifactType{
+			ID: "usn", Name: "USN Journal", Icon: "📓", Tool: "MFTECmd",
+			Category: "Filesystem", File: "MFTECmd_UsnJrnl_Output.csv",
+			PrimaryTime: "UpdateTimestamp",
+			ContextFields: []string{"ParentPath", "UpdateReasons", "Extension"},
+		},
+		FilenamePattern: regexp.MustCompile(`(?i)UsnJrnl.*\.csv$`),
+		Columns: []model.Column{
+			{Key: "UpdateTimestamp", Label: "Timestamp", Width: 180, Mono: true},
+			{Key: "Name", Label: "Name", Width: 220},
+			{Key: "Extension", Label: "Ext", Width: 60},
+			{Key: "UpdateReasons", Label: "Reason", Width: 200},
+			{Key: "ParentPath", Label: "Parent Path", Width: 320, Mono: true},
+			{Key: "FileAttributes", Label: "Attributes", Width: 160},
+			{Key: "EntryNumber", Label: "Entry", Width: 80, Numeric: true, Mono: true},
+			{Key: "SequenceNumber", Label: "Seq", Width: 70, Numeric: true, Mono: true},
+			{Key: "ParentEntryNumber", Label: "Parent Entry", Width: 90, Numeric: true, Mono: true},
+			{Key: "UpdateSequenceNumber", Label: "USN", Width: 110, Numeric: true, Mono: true},
+			{Key: "SourceFile", Label: "Source", Width: 240, Mono: true},
+		},
+	},
+	{
 		ArtifactType: model.ArtifactType{
 			ID: "mft", Name: "MFT", Icon: "🗂", Tool: "MFTECmd",
-			Category: "Filesystem", File: "$MFT_Output.csv",
+			Category: "Filesystem", File: "MFTECmd_Output.csv",
 			PrimaryTime: "Created0x10",
 			ContextFields: []string{"ParentPath", "FileSize", "Extension", "InUse"},
 		},
-		FilenamePattern: regexp.MustCompile(`(?i)MFT.*Output.*\.csv$`),
+		// Match MFTECmd's $MFT output but NOT its USN output
+		// (MFTECmd_UsnJrnl_Output.csv). Go's RE2 has no negative
+		// lookahead, so instead of a loose "MFT.*Output" we anchor to the
+		// two real forms: "MFTECmd_Output..." and "$MFT_Output...". The
+		// USN file contains "UsnJrnl" and matches neither, so there's no
+		// overlap regardless of registration order.
+		FilenamePattern: regexp.MustCompile(`(?i)(MFTECmd_Output|\$MFT_Output).*\.csv$`),
 		Columns: []model.Column{
 			{Key: "EntryNumber", Label: "Entry", Width: 70, Numeric: true, Mono: true},
 			{Key: "InUse", Label: "In Use", Width: 60, Bool: true},
@@ -398,11 +431,18 @@ var ArtifactTypes = []ArtifactType{
 		// combined report.
 		ArtifactType: model.ArtifactType{
 			ID: "shellbags", Name: "Shellbags", Icon: "📁", Tool: "SBECmd",
-			Category: "Filesystem", File: "20260515093000_SBECmd_NTUSER_Output.csv",
+			Category: "Filesystem", File: "<user>_NTUSER.csv / <user>_UsrClass.csv",
 			PrimaryTime:   "LastInteracted",
 			ContextFields: []string{"AbsolutePath", "HiveKind", "Slot"},
 		},
-		FilenamePattern: regexp.MustCompile(`(?i)SBECmd.*Output.*\.csv$`),
+		// SBECmd run with `-d <profiles> --csv <dir>` (no --csvf) names its
+		// output per user + hive: "<username>_NTUSER.csv" and
+		// "<username>_UsrClass.csv" -- NOT "SBECmd_..._Output.csv". The
+		// prior pattern (SBECmd.*Output) never matched real output, so the
+		// shellbags artifact silently never appeared. Anchor on the two
+		// stable hive-name suffixes instead. No other tool in the pipeline
+		// emits *_NTUSER.csv / *_UsrClass.csv, so there's no collision.
+		FilenamePattern: regexp.MustCompile(`(?i)_(NTUSER|UsrClass)\.csv$`),
 		Parser:          parseShellbags,
 		Columns: []model.Column{
 			{Key: "LastInteracted", Label: "Last Interacted", Width: 170, Mono: true},

@@ -852,6 +852,11 @@ const state = {
   hosts: [],         // [Host]
   marks: [],         // [Mark]
   expandedHosts: new Set(),
+  // expandedUAGroups: host ids whose "User Activity" sidebar subgroup is
+  // expanded. Defaults to collapsed (absent) so the group doesn't bloat
+  // the sidebar -- the analyst opens it when they want user-activity
+  // artifacts.
+  expandedUAGroups: new Set(),
   tabs: [],          // [{ kind: 'artifact'|'host-timeline'|'global-timeline', hostId, artifactId, label }]
   activeTab: -1,
   artifactCache: {}, // key "host|art" -> full artifact
@@ -1380,6 +1385,18 @@ function renderJobPanel() {
   else document.body.appendChild(panel);
 }
 
+// shortProgress condenses a job's progress for the one-line summary.
+// The preprocessor progress field holds a multi-line log tail; we show
+// only the last non-empty line so the card stays compact. Uploads and
+// other jobs whose progress is already a single short string pass
+// through unchanged.
+function shortProgress(j) {
+  const p = j.progress || j.status || '';
+  if (!p.includes('\n')) return p;
+  const lines = p.split('\n').map(s => s.trim()).filter(Boolean);
+  return lines.length ? lines[lines.length - 1] : j.status;
+}
+
 function renderJobItem(j) {
   const hostName = (state.hosts.find(h => h.id === j.hostId) || {}).name || j.hostId;
   const icon =
@@ -1393,7 +1410,37 @@ function renderJobItem(j) {
     $('span', { class: 'job-icon' }, icon),
     $('span', { class: 'job-file' }, j.fileName || '(unnamed)'),
   ));
-  card.appendChild($('div', { class: 'job-line-2' }, `${hostName} · ${j.progress || j.status}`));
+
+  // Step-aware progress for running preprocess jobs. When we have
+  // structured step info (stepTotal > 0) show a determinate-ish bar
+  // (n of total tools) plus the current tool name and a stall timer.
+  // The bar is honest: it reflects "tools started", not a fabricated
+  // overall percent. An indeterminate shimmer rides on top to signal
+  // "actively receiving output" vs. "stalled".
+  if ((j.status === 'running' || j.status === 'queued') && j.stepTotal > 0) {
+    const pct = Math.min(100, Math.round((j.stepNum / j.stepTotal) * 100));
+    // Stall detection: seconds since the last line of tool output.
+    let stallSecs = null;
+    if (j.lastLineAt) {
+      stallSecs = Math.max(0, Math.round((Date.now() - new Date(j.lastLineAt).getTime()) / 1000));
+    }
+    const stalled = stallSecs != null && stallSecs >= 90;
+    const bar = $('div', { class: 'job-bar' + (stalled ? ' stalled' : '') },
+      $('div', { class: 'job-bar-fill', style: { width: pct + '%' } }),
+      // The shimmer overlay only animates while not stalled (CSS).
+      $('div', { class: 'job-bar-shimmer' }),
+    );
+    card.appendChild(bar);
+    card.appendChild($('div', { class: 'job-step' },
+      $('span', { class: 'job-step-name' },
+        `Step ${j.stepNum}/${j.stepTotal}` + (j.stepName ? ` · ${j.stepName}` : '')),
+      stallSecs != null && $('span', { class: 'job-step-stall' + (stalled ? ' warn' : '') },
+        stalled ? `no output for ${stallSecs}s — may be a long step or stalled`
+                : `active · ${stallSecs}s since last line`),
+    ));
+  }
+
+  card.appendChild($('div', { class: 'job-line-2' }, `${hostName} · ${shortProgress(j)}`));
   if (j.status === 'failed' && j.error) {
     card.appendChild($('div', { class: 'job-err' }, j.error));
   }
@@ -2407,21 +2454,54 @@ function renderHostBranch(host) {
         $('span', { class: 'label' }, 'Timeline'),
         $('span', { class: 'count' }, String(hostMarks.length)),
       ),
-      ...(host.artifacts || []).map(a => $('div', {
-        class: 'art-row' + (
-          activeTab && activeTab.kind === 'artifact' &&
-          activeTab.hostId === host.id && activeTab.artifactId === a.id
-            ? ' active' : ''),
-        onclick: () => openTab({
-          kind: 'artifact', hostId: host.id, artifactId: a.id,
-          label: `${host.name} · ${a.name}`,
-        }),
-      },
-        $('span', { class: 'ico' }, a.icon || '·'),
-        $('span', { class: 'label' }, a.name),
-        a.alertCount > 0 && $('span', { class: 'dot-sev' }),
-        $('span', { class: 'count' }, (a.rowCount || 0).toLocaleString()),
-      )),
+      ...(() => {
+        const allArts = host.artifacts || [];
+        // Build a single artifact row (reused by the flat list and the
+        // User Activity subgroup).
+        const artRow = (a, extraClass) => $('div', {
+          class: 'art-row' + (extraClass || '') + (
+            activeTab && activeTab.kind === 'artifact' &&
+            activeTab.hostId === host.id && activeTab.artifactId === a.id
+              ? ' active' : ''),
+          onclick: () => openTab({
+            kind: 'artifact', hostId: host.id, artifactId: a.id,
+            label: `${host.name} · ${a.name}`,
+          }),
+        },
+          $('span', { class: 'ico' }, a.icon || '·'),
+          $('span', { class: 'label' }, a.name),
+          a.alertCount > 0 && $('span', { class: 'dot-sev' }),
+          $('span', { class: 'count' }, (a.rowCount || 0).toLocaleString()),
+        );
+
+        // Partition: user-activity artifacts (Category "User Activity")
+        // nest under a collapsible group; everything else stays flat.
+        const ua = allArts.filter(a => a.category === 'User Activity');
+        const rest = allArts.filter(a => a.category !== 'User Activity');
+
+        const nodes = rest.map(a => artRow(a));
+
+        if (ua.length > 0) {
+          const uaOpen = state.expandedUAGroups.has(host.id);
+          const uaRows = ua.reduce((s, a) => s + (a.rowCount || 0), 0);
+          nodes.push($('div', {
+            class: 'art-row ua-group-head' + (uaOpen ? ' open' : ''),
+            onclick: () => {
+              if (uaOpen) state.expandedUAGroups.delete(host.id);
+              else state.expandedUAGroups.add(host.id);
+              render();
+            },
+          },
+            $('span', { class: 'ico' }, uaOpen ? '\u25BE' : '\u25B8'),
+            $('span', { class: 'label' }, 'User Activity'),
+            $('span', { class: 'count' }, String(ua.length)),
+          ));
+          if (uaOpen) {
+            for (const a of ua) nodes.push(artRow(a, ' ua-child'));
+          }
+        }
+        return nodes;
+      })(),
     ),
   );
 }
@@ -4759,13 +4839,18 @@ function renderFinding(host, group, f) {
 // state, so "checked, clean" reads differently from "didn't check".
 function noneFoundMessage(groupId) {
   switch (groupId) {
-    case 'run-keys':     return 'No Run / RunOnce autostart entries found.';
-    case 'winlogon':     return 'Shell / Userinit / Notify all default — nothing suspicious.';
-    case 'services':     return 'No services launching from unusual paths or via script interpreters.';
-    case 'sched-tasks':  return 'No scheduled-task registrations matched.';
-    case 'susp-amcache': return 'No Amcache executions from temp / download / profile paths.';
-    case 'susp-prefetch':return 'No prefetch entries referencing unusual locations.';
-    default:             return 'Nothing flagged.';
+    case 'run-keys':       return 'No Run / RunOnce autostart entries found.';
+    case 'winlogon':       return 'Shell / Userinit / Notify all default — nothing suspicious.';
+    case 'services':       return 'No services launching from unusual paths or via script interpreters.';
+    case 'sched-tasks':    return 'No scheduled-task registrations matched.';
+    case 'appinit-dlls':   return 'AppInit_DLLs / AppCertDlls empty — clean.';
+    case 'ifeo':           return 'No Image File Execution Options debuggers set.';
+    case 'lsa-packages':   return 'LSA security / authentication packages all default.';
+    case 'com-hijack':     return 'No CLSID servers in unusual paths.';
+    case 'defender-tamper':return 'No Defender exclusions or disabled protection.';
+    case 'susp-amcache':   return 'No Amcache executions from temp / download / profile paths.';
+    case 'susp-prefetch':  return 'No prefetch entries referencing unusual locations.';
+    default:               return 'Nothing flagged.';
   }
 }
 
