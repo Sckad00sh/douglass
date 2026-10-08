@@ -636,6 +636,14 @@ function openImportModal() {
         disabled: busy ? 'disabled' : false,
         onclick: () => backdrop.remove(),
       }, 'Cancel'),
+      // Import a folder of Velociraptor offline collections -> one case,
+      // many hosts. Opens its own focused flow.
+      $('button', {
+        class: 'btn',
+        disabled: busy ? 'disabled' : false,
+        title: 'Import a folder of Velociraptor offline-collector zips',
+        onclick: () => { backdrop.remove(); openVeloImportModal(); },
+      }, '🦖 Velociraptor collections'),
       $('button', {
         class: 'btn primary',
         disabled: busy ? 'disabled' : false,
@@ -652,6 +660,138 @@ function openImportModal() {
       backdrop.remove();
       document.removeEventListener('keydown', onKey);
     }
+  };
+  document.addEventListener('keydown', onKey);
+}
+
+// openVeloImportModal is the Velociraptor-collection import flow: point
+// at a folder of offline-collector zips + an output case folder, preview
+// the dedup plan (which collections are new vs. already imported), then
+// import them all as hosts in one case.
+function openVeloImportModal() {
+  let collectionsDir = '';
+  let outputRoot = '';
+  let plan = null;       // null until previewed
+  let busy = false;
+  let errMsg = '';
+  let phase = 'input';   // input -> preview -> running
+
+  const backdrop = $('div', { class: 'modal-backdrop' });
+
+  async function preview() {
+    if (!collectionsDir) { errMsg = 'Collections folder is required.'; rerender(); return; }
+    busy = true; errMsg = ''; rerender();
+    try {
+      const res = await api.veloPlan(collectionsDir);
+      plan = res.plan || [];
+      phase = 'preview';
+    } catch (e) {
+      errMsg = e.message || String(e);
+    }
+    busy = false; rerender();
+  }
+
+  async function runImport() {
+    if (!outputRoot) { errMsg = 'Output case folder is required.'; rerender(); return; }
+    busy = true; errMsg = ''; phase = 'running'; rerender();
+    try {
+      const res = await api.veloImport({ dir: collectionsDir, outputRoot });
+      // Hand off to the jobs panel for progress; close the modal.
+      if (res.jobId) {
+        kickJobPolling();
+        backdrop.remove();
+        toast('Velociraptor import started — see Jobs for progress', false);
+        return;
+      }
+      errMsg = 'import did not start';
+      phase = 'preview';
+    } catch (e) {
+      errMsg = e.message || String(e);
+      phase = 'preview';
+    }
+    busy = false; rerender();
+  }
+
+  function rerender() {
+    const willImport = plan ? plan.filter(p => p.willImport).length : 0;
+    const skipped = plan ? plan.length - willImport : 0;
+    const body = [
+      $('p', null,
+        'Point at the central folder of Velociraptor offline-collector ' +
+        'zips. Each new collection becomes a host in one case; collections ' +
+        'already imported (matched by session id) are skipped.'),
+      $('label', null, 'Collections folder (the zips)'),
+      $('div', { class: 'path-row' },
+        $('input', {
+          type: 'text', class: errMsg && !collectionsDir ? 'err' : '',
+          placeholder: 'C:\\Collections\\acme   or   /evidence/acme',
+          value: collectionsDir, disabled: busy ? 'disabled' : false,
+          oninput: (e) => { collectionsDir = e.target.value; plan = null; phase = 'input'; },
+        }),
+        $('button', {
+          class: 'btn', disabled: busy ? 'disabled' : false,
+          onclick: () => openFolderBrowser(collectionsDir, (p) => { collectionsDir = p; plan = null; phase = 'input'; rerender(); }),
+        }, '📁'),
+      ),
+      $('label', null, 'Output case folder'),
+      $('div', { class: 'path-row' },
+        $('input', {
+          type: 'text', class: errMsg && !outputRoot ? 'err' : '',
+          placeholder: 'C:\\Cases\\acme-2026',
+          value: outputRoot, disabled: busy ? 'disabled' : false,
+          oninput: (e) => { outputRoot = e.target.value; },
+        }),
+        $('button', {
+          class: 'btn', disabled: busy ? 'disabled' : false,
+          onclick: () => openFolderBrowser(outputRoot, (p) => { outputRoot = p; rerender(); }),
+        }, '📁'),
+      ),
+      errMsg && $('div', { class: 'err-msg' }, '⚠ ' + errMsg),
+    ];
+
+    if (plan) {
+      body.push($('div', { class: 'velo-plan-summary' },
+        `${willImport} to import · ${skipped} skipped · ${plan.length} total`));
+      body.push($('div', { class: 'velo-plan-list' },
+        ...plan.map(p => $('div', { class: 'velo-plan-row' + (p.willImport ? '' : ' skip') },
+          $('span', { class: 'velo-ico' }, p.willImport ? '✓' : (p.error ? '⚠' : '⊘')),
+          $('span', { class: 'velo-host' }, p.hostname || p.zip),
+          $('span', { class: 'velo-detail' },
+            p.willImport ? (p.os || '') : (p.skipReason || p.error || 'skipped')),
+        )),
+      ));
+    }
+
+    const foot = [
+      $('button', { class: 'btn', disabled: busy ? 'disabled' : false, onclick: () => backdrop.remove() }, 'Cancel'),
+    ];
+    if (!plan) {
+      foot.push($('button', { class: 'btn primary', disabled: busy ? 'disabled' : false, onclick: preview },
+        busy ? 'Scanning…' : 'Preview'));
+    } else {
+      foot.push($('button', { class: 'btn', disabled: busy ? 'disabled' : false, onclick: preview }, 'Re-scan'));
+      foot.push($('button', {
+        class: 'btn primary',
+        disabled: (busy || willImport === 0) ? 'disabled' : false,
+        onclick: runImport,
+      }, busy ? 'Starting…' : `Import ${willImport} host${willImport === 1 ? '' : 's'}`));
+    }
+
+    backdrop.replaceChildren($('div', { class: 'modal' },
+      $('div', { class: 'modal-head' },
+        $('div', { class: 'ico' }, '🦖'),
+        $('h3', null, 'Import Velociraptor collections'),
+        $('button', { class: 'close', onclick: () => backdrop.remove() }, '✕'),
+      ),
+      $('div', { class: 'modal-body' }, ...body),
+      $('div', { class: 'modal-foot' }, ...foot),
+    ));
+  }
+
+  document.body.appendChild(backdrop);
+  rerender();
+  const onKey = (e) => {
+    if (e.key === 'Escape') { backdrop.remove(); document.removeEventListener('keydown', onKey); }
   };
   document.addEventListener('keydown', onKey);
 }
@@ -1005,6 +1145,13 @@ const api = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(cfg),
+  }),
+  // Velociraptor import: plan (dedup preview) then run.
+  veloPlan: (dir) => fetchJSON('/api/import/velociraptor?dir=' + encodeURIComponent(dir)),
+  veloImport: (req) => fetchJSON('/api/import/velociraptor', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
   }),
 };
 

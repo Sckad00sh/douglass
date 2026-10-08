@@ -55,6 +55,13 @@ hayabusa-*.zip
 # marks.json lives in the case folder, but stray copies sometimes appear.
 marks.json
 
+# --- Velociraptor import dedup manifest ---
+# Lives in the central COLLECTIONS folder (case/evidence data), never in
+# the repo -- it tracks which collections have been imported, keyed by
+# session_id. Ignored here as belt-and-braces so it can never be
+# committed even if a collections folder sits inside a checkout.
+.douglas-imported.json
+
 # --- Misc ---
 *.tar.gz
 *.zip

@@ -53,6 +53,10 @@ const (
 	// so the front-end knows about the variant before it's
 	// implemented.
 	KindPreprocess Kind = "preprocess"
+	// KindImport (v0.19.0+) is a Velociraptor-collection import: a folder
+	// of offline-collector zips is extracted, normalized, and run through
+	// the preprocessor, one host per collection, into a single case.
+	KindImport Kind = "import"
 )
 
 // Job is the public view of a job: read-only from the outside, mutated

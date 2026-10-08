@@ -23,6 +23,7 @@ import (
 	"github.com/example/artifact-review/internal/marks"
 	"github.com/example/artifact-review/internal/model"
 	"github.com/example/artifact-review/internal/preprocess"
+	"github.com/example/artifact-review/internal/velociraptor"
 	"github.com/example/artifact-review/internal/triage"
 )
 
@@ -87,6 +88,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/jobs/", s.handleJobByID)
 	mux.HandleFunc("/api/preprocess", s.handlePreprocess)
+	mux.HandleFunc("/api/import/velociraptor", s.handleImportVelociraptor)
 	mux.HandleFunc("/api/preprocess/tools", s.handlePreprocessTools)
 	mux.Handle("/", s.staticHandler())
 	return localOnly(mux)
@@ -1078,6 +1080,280 @@ func (s *Server) handlePreprocess(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "GET or POST required")
+	}
+}
+
+// handleImportVelociraptor imports a folder of Velociraptor offline-
+// collector zips into a single case, one host per collection.
+//
+//	GET  /api/import/velociraptor?dir=<folder>   -> import PLAN (dedup
+//	        preview): which collections are new vs. already-imported.
+//	POST /api/import/velociraptor  { dir, outputRoot, caseId?, toolsRoot?,
+//	        recmdBatch?, force? }  -> run the import as a job.
+//
+// The dedup manifest (.douglas-imported.json) lives in <dir> -- the
+// central collections folder, never the repo -- keyed by Velociraptor
+// session_id. Already-imported collections are skipped with a notice.
+func (s *Server) handleImportVelociraptor(w http.ResponseWriter, r *http.Request) {
+	if s.preprocess == nil {
+		writeErr(w, http.StatusServiceUnavailable,
+			"import needs the preprocessor, which is unavailable: no PowerShell interpreter found")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Plan preview: show what WOULD be imported, for a confirm step.
+		dir := r.URL.Query().Get("dir")
+		if dir == "" {
+			writeErr(w, http.StatusBadRequest, "dir query parameter required")
+			return
+		}
+		man, err := velociraptor.LoadManifest(dir)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "load manifest: "+err.Error())
+			return
+		}
+		plans, err := velociraptor.PlanImport(dir, man, false)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"plan": planView(plans)})
+		return
+
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+		var req struct {
+			Dir        string `json:"dir"`
+			OutputRoot string `json:"outputRoot"`
+			CaseID     string `json:"caseId,omitempty"`
+			ToolsRoot  string `json:"toolsRoot,omitempty"`
+			RECmdBatch string `json:"recmdBatch,omitempty"`
+			Force      bool   `json:"force,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if req.Dir == "" || req.OutputRoot == "" {
+			writeErr(w, http.StatusBadRequest, "dir and outputRoot are required")
+			return
+		}
+
+		dir, outputRoot := req.Dir, req.OutputRoot
+		toolsRoot, recmdBatch, force := req.ToolsRoot, req.RECmdBatch, req.Force
+
+		work := func(ctx context.Context, j *jobs.Job) (string, error) {
+			man, err := velociraptor.LoadManifest(dir)
+			if err != nil {
+				return "", fmt.Errorf("load manifest: %w", err)
+			}
+			plans, err := velociraptor.PlanImport(dir, man, force)
+			if err != nil {
+				return "", err
+			}
+			// Count what we'll actually do.
+			var todo []velociraptor.CollectionPlan
+			for _, p := range plans {
+				if p.Imported() {
+					todo = append(todo, p)
+				}
+			}
+			if len(todo) == 0 {
+				// Nothing to do -- say why (all skipped, or none found).
+				s.jobs.SetProgress(j.ID, importSkipSummary(plans))
+				// If the case dir already exists from a prior import, open it.
+				if _, statErr := os.Stat(outputRoot); statErr == nil {
+					_ = s.cases.Open(outputRoot)
+				}
+				return outputRoot, nil
+			}
+
+			if err := os.MkdirAll(outputRoot, 0o755); err != nil {
+				return "", fmt.Errorf("create output root: %w", err)
+			}
+
+			// Staging root for normalized trees. One temp dir, cleaned at
+			// the end; each collection gets a subdir that's removed after
+			// its preprocess run so disk use stays bounded to one host.
+			stageRoot, err := os.MkdirTemp("", "douglas-velo-")
+			if err != nil {
+				return "", fmt.Errorf("create staging dir: %w", err)
+			}
+			defer os.RemoveAll(stageRoot)
+
+			var imported, failed int
+			var skipLines []string
+			for _, p := range plans {
+				if !p.Imported() {
+					skipLines = append(skipLines, fmt.Sprintf("skip: %s -- %s", p.ZipName, p.SkipWhy))
+					continue
+				}
+				host := velociraptor.HostDirName(p.Meta)
+				s.jobs.SetStep(j.ID, imported+failed+1, len(todo), host)
+				s.jobs.SetProgress(j.ID, fmt.Sprintf("importing %s (host %s)", p.ZipName, host))
+
+				stage := filepath.Join(stageRoot, host)
+				if err := os.MkdirAll(stage, 0o755); err != nil {
+					failed++
+					skipLines = append(skipLines, fmt.Sprintf("FAIL: %s -- staging: %v", p.ZipName, err))
+					continue
+				}
+				meta, err := velociraptor.Normalize(p.ZipPath, stage)
+				if err != nil {
+					failed++
+					skipLines = append(skipLines, fmt.Sprintf("FAIL: %s -- normalize: %v", p.ZipName, err))
+					os.RemoveAll(stage)
+					continue
+				}
+
+				cfg := preprocess.Config{
+					ImagePath:        stage,
+					OutputRoot:       outputRoot,
+					HostName:         host,
+					CaseID:           req.CaseID,
+					ToolsRoot:        toolsRoot,
+					RECmdBatch:       recmdBatch,
+					CollectionMethod: "velociraptor-offline",
+					RunHayabusa:      true,
+				}
+				// Stream the per-host preprocess output into this job's
+				// activity timer (full detail goes to the host's own
+				// run-zimmerman.log as always).
+				exitCode, runErr := s.preprocess.Run(ctx, cfg, func(line string) {
+					s.jobs.TouchActivity(j.ID)
+				})
+				os.RemoveAll(stage) // free ~300MB before the next host
+				if runErr != nil {
+					failed++
+					skipLines = append(skipLines, fmt.Sprintf("FAIL: %s -- %v", p.ZipName, runErr))
+					continue
+				}
+				if exitCode != 0 {
+					failed++
+					skipLines = append(skipLines, fmt.Sprintf("FAIL: %s -- preprocessor exit %d", p.ZipName, exitCode))
+					continue
+				}
+
+				// Overlay identity from client_info.json so the host card
+				// shows Velociraptor's captured hostname/OS/timezone rather
+				// than relying on hive probes against the staged tree.
+				writeVeloIdentity(outputRoot, host, meta)
+
+				// Record in the manifest so a re-run skips this collection.
+				_ = man.Record(velociraptor.ManifestEntry{
+					SessionID: meta.SessionID,
+					Hostname:  meta.Hostname,
+					SourceZip: p.ZipName,
+					CaseDir:   outputRoot,
+				})
+				imported++
+			}
+
+			// Open the resulting case (all hosts land in outputRoot).
+			if err := s.cases.Open(outputRoot); err != nil {
+				return "", fmt.Errorf("import finished but open failed: %w", err)
+			}
+			summary := fmt.Sprintf("imported %d host(s), %d failed, %d skipped",
+				imported, failed, len(skipLines)-failed)
+			if len(skipLines) > 0 {
+				summary += "\n" + strings.Join(skipLines, "\n")
+			}
+			s.jobs.SetProgress(j.ID, summary)
+			return outputRoot, nil
+		}
+
+		j := s.jobs.Enqueue(jobs.KindImport, "", "Velociraptor import",
+			"velociraptor", work)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"jobId":  j.ID,
+			"status": j.Status,
+		})
+		return
+
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "GET or POST required")
+	}
+}
+
+// planView converts import plans to a JSON-friendly preview.
+func planView(plans []velociraptor.CollectionPlan) []map[string]any {
+	out := make([]map[string]any, 0, len(plans))
+	for _, p := range plans {
+		row := map[string]any{
+			"zip":      p.ZipName,
+			"willImport": p.Imported(),
+		}
+		if p.Meta.SessionID != "" {
+			row["hostname"] = p.Meta.Hostname
+			row["os"] = p.Meta.OS
+			row["sessionId"] = p.Meta.SessionID
+		}
+		if p.Skip {
+			row["skipReason"] = p.SkipWhy
+		}
+		if p.ReadErr != "" {
+			row["error"] = p.ReadErr
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// importSkipSummary builds a "nothing imported" explanation.
+func importSkipSummary(plans []velociraptor.CollectionPlan) string {
+	if len(plans) == 0 {
+		return "no .zip collections found in that folder"
+	}
+	var lines []string
+	for _, p := range plans {
+		lines = append(lines, fmt.Sprintf("skip: %s -- %s", p.ZipName, p.SkipWhy))
+	}
+	return "nothing to import:\n" + strings.Join(lines, "\n")
+}
+
+// writeVeloIdentity overlays the collection's client_info.json-derived
+// identity onto the host's host.json after preprocessing, so the overview
+// shows Velociraptor's captured values. Best-effort: a failure here just
+// means the host card falls back to whatever the preprocessor wrote.
+func writeVeloIdentity(outputRoot, host string, meta velociraptor.Metadata) {
+	hostDir := filepath.Join(outputRoot, "hosts", host)
+	hj := filepath.Join(hostDir, "host.json")
+	// Read existing (the preprocessor wrote one), merge our identity in.
+	existing := map[string]any{}
+	if b, err := os.ReadFile(hj); err == nil {
+		_ = json.Unmarshal(b, &existing)
+	}
+	identity, _ := existing["identity"].(map[string]any)
+	if identity == nil {
+		identity = map[string]any{}
+	}
+	if meta.Hostname != "" {
+		identity["hostname"] = meta.Hostname
+	}
+	if meta.OS != "" {
+		identity["os"] = meta.OS
+	}
+	if meta.OSVersion != "" {
+		identity["osVersion"] = meta.OSVersion
+	}
+	if meta.Fqdn != "" {
+		identity["fqdn"] = meta.Fqdn
+	}
+	if meta.Arch != "" {
+		identity["arch"] = meta.Arch
+	}
+	if meta.TimeZone != "" {
+		identity["timeZone"] = meta.TimeZone
+	}
+	existing["identity"] = identity
+	existing["collectionMethod"] = "velociraptor-offline"
+	if b, err := json.MarshalIndent(existing, "", "  "); err == nil {
+		tmp := hj + ".tmp"
+		if os.WriteFile(tmp, b, 0o644) == nil {
+			_ = os.Rename(tmp, hj)
+		}
 	}
 }
 
